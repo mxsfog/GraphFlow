@@ -1,0 +1,20 @@
+name: electromotiv-orientdb
+
+services:
+  orientdb:
+    image: orientdb:latest
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:2424:2424"
+      - "127.0.0.1:2480:2480"
+    environment:
+      ORIENTDB_ROOT_PASSWORD: ${ORIENTDB_ROOT_PASSWORD}
+    volumes:
+      - ../.runtime/orientdb/databases:/orientdb/databases
+      - ../.runtime/orientdb/backup:/orientdb/backup
+    networks:
+      - electromotiv
+
+networks:
+  electromotiv:
+    driver: bridge

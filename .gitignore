@@ -1,0 +1,17 @@
+.env
+key.txt
+service-account*.json
+electromotiv-practice-*.json
+*.pem
+*.key
+
+.runtime/
+.venv/
+.idea/
+.pytest_cache/
+.ruff_cache/
+__pycache__/
+*.pyc
+*.log
+
+outputs/

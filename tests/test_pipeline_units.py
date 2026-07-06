@@ -1,0 +1,135 @@
+from __future__ import annotations
+
+from electromotiv_pipeline.config import get_bool_env
+from electromotiv_pipeline.google_news import deduplicate_articles, parse_google_news_rss
+from electromotiv_pipeline.google_sheets import ranked_link_to_row, sheet_range
+from electromotiv_pipeline.models import Article, RankedLink
+from electromotiv_pipeline.openrouter import parse_ranked_links
+from electromotiv_pipeline.orientdb import orient_datetime, split_sql_statements
+
+
+def test_parse_google_news_rss() -> None:
+    payload = b"""
+    <rss><channel>
+      <item>
+        <title>Oil price spike hits futures market</title>
+        <link>https://example.com/news</link>
+        <source>Example</source>
+        <pubDate>Tue, 02 Jul 2026 10:00:00 GMT</pubDate>
+        <description>Brent crude futures moved higher.</description>
+      </item>
+    </channel></rss>
+    """
+
+    articles = parse_google_news_rss(payload, max_records=5)
+
+    assert len(articles) == 1
+    assert articles[0].title == "Oil price spike hits futures market"
+    assert articles[0].url == "https://example.com/news"
+
+
+def test_parse_ranked_links_clamps_score() -> None:
+    content = """
+    ```json
+    {"results":[{"rank":1,"title":"A","url":"https://example.com/a","source":"S",
+    "published_at":"2026-07-02T10:00:00Z","llm_score":1.7,
+    "keywords":["bitcoin","etf"],"reason":"Relevant"}]}
+    ```
+    """
+
+    ranked = parse_ranked_links(content=content, query="oil")
+
+    assert len(ranked) == 1
+    assert ranked[0].llm_score == 1.0
+    assert ranked[0].keywords == ("bitcoin", "etf")
+
+
+def test_parse_ranked_links_uses_article_index() -> None:
+    article = Article(
+        index=2,
+        title="Oil futures spike after supply shock",
+        url="https://example.com/real",
+        source="Example",
+        published_at="2026-07-02T10:00:00Z",
+        snippet="Brent futures moved sharply higher.",
+    )
+    content = """
+    {"results":[{"rank":1,"article_index":2,"llm_score":0.8,
+    "keywords":["oil futures","supply shock"],"reason":"Direct"}]}
+    """
+
+    ranked = parse_ranked_links(content=content, query="oil", articles=[article])
+
+    assert ranked[0].url == "https://example.com/real"
+    assert ranked[0].llm_score == 0.8
+    assert ranked[0].keywords == ("oil futures", "supply shock")
+
+
+def test_deduplicate_articles_by_url_and_title() -> None:
+    first = Article(
+        index=1,
+        title="Oil price spike",
+        url="https://example.com/a?utm_source=x",
+        source="A",
+        published_at="",
+        snippet="",
+    )
+    second = Article(
+        index=2,
+        title="Oil price spike",
+        url="https://example.com/a?utm_source=y",
+        source="B",
+        published_at="",
+        snippet="",
+    )
+
+    deduplicated = deduplicate_articles([first, second])
+
+    assert len(deduplicated) == 1
+
+
+def test_orient_datetime_accepts_rfc822_and_iso() -> None:
+    assert orient_datetime("Tue, 02 Jul 2026 10:00:00 GMT") == "2026-07-02 10:00:00"
+    assert orient_datetime("2026-07-02T10:00:00Z") == "2026-07-02 10:00:00"
+
+
+def test_split_sql_statements() -> None:
+    statements = split_sql_statements("CREATE CLASS A;\n\nCREATE PROPERTY A.name STRING;")
+
+    assert statements == ["CREATE CLASS A", "CREATE PROPERTY A.name STRING"]
+
+
+def test_google_sheets_row_format() -> None:
+    link = RankedLink(
+        query="oil",
+        run_id="run-1",
+        rank=1,
+        article_index=2,
+        title="Oil futures spike",
+        url="https://example.com/news",
+        source="Example",
+        source_name="google_news",
+        domain="example.com",
+        published_at="2026-07-02T10:00:00Z",
+        llm_score=0.8,
+        reason="Связано со скачком цены нефти.",
+        created_at="2026-07-02T10:01:00+00:00",
+        model="deepseek/deepseek-v4-flash",
+        keywords=("oil", "futures"),
+    )
+
+    row = ranked_link_to_row(link)
+
+    assert row[0] == "2026-07-02T10:01:00+00:00"
+    assert row[5] == "https://example.com/news"
+    assert row[11] == "oil, futures"
+
+
+def test_google_sheets_range_quotes_sheet_name() -> None:
+    assert sheet_range("news links", "A1:L1") == "%27news%20links%27%21A1%3AL1"
+
+
+def test_get_bool_env(monkeypatch) -> None:
+    monkeypatch.setenv("GOOGLE_SHEETS_ENABLED", "true")
+
+    assert get_bool_env("GOOGLE_SHEETS_ENABLED", False) is True
