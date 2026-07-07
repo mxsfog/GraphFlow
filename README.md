@@ -21,6 +21,7 @@ Python CLI -> Google News RSS -> LLM OpenRouter -> OrientDB + Google Sheets
 - `scripts/start_stack.sh` - запуск инфраструктуры.
 - `scripts/check_environment.sh` - проверка окружения и Docker.
 - `docs/PYTHON_PIPELINE.md` - инструкция по пайплайну.
+- `docs/GRAPH_VISUALIZATION.md` - API и frontend для интерактивных графов.
 - `docs/D_ONLY_STORAGE.md` - контроль хранения Docker-данных на диске D.
 
 ## Требования
@@ -117,11 +118,10 @@ PYTHONPATH=src python3 -m electromotiv_pipeline run --model deepseek/deepseek-v4
 Ребра:
 
 - `Found` - запуск нашел новость.
-- `FoundBy` - совместимость со старой схемой.
 - `FromSource` - новость относится к источнику.
-- `About` - новость относится к теме.
-- `AnalyzedBy` - новость оценена моделью.
-- `AnalyzedAs` - совместимость со старой схемой.
+- `About` - запуск относится к теме.
+- `AnalyzedBy` - запуск обработан моделью.
+- `AnalyzedAs` - модель оценила новость.
 
 ## Локальная панель просмотра
 
@@ -134,6 +134,24 @@ PYTHONPATH=src python3 -m electromotiv_pipeline dashboard --host 127.0.0.1 --por
 ```text
 http://127.0.0.1:8088
 ```
+
+## API интерактивного графа
+
+Запустить API:
+
+```bash
+PYTHONPATH=src python3 -m electromotiv_pipeline graph-api --host 127.0.0.1 --port 8090
+```
+
+Примеры:
+
+```bash
+curl "http://127.0.0.1:8090/api/graph/schema"
+curl "http://127.0.0.1:8090/api/search-runs"
+curl "http://127.0.0.1:8090/api/graph/latest-run?notation=flow&limit=6"
+```
+
+Графовая визуализация по умолчанию строится из реальных запусков `SearchRun`, найденных ссылок `NewsLink`, источников `Source`, темы `Topic` и модели `ModelRun`. Frontend расположен в `frontend`. Он использует React Flow, позволяет выбрать запуск и поддерживает переключение нотаций `flow`, `use_case`, `component`, `class`.
 
 ## Проверки
 

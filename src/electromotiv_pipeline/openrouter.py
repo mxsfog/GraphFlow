@@ -22,9 +22,50 @@ def rank_articles_with_openrouter(
     if not articles:
         return []
 
-    body = build_openrouter_request_body(model=model, query=query, articles=articles)
+    last_error: RuntimeError | None = None
+    for strict_json in (True, False):
+        body = build_openrouter_request_body(
+            model=model,
+            query=query,
+            articles=articles,
+            strict_json=strict_json,
+        )
+        try:
+            payload = request_openrouter(
+                api_key=api_key,
+                body=body,
+                timeout_seconds=timeout_seconds,
+            )
+            content = extract_message_content(payload)
+            return parse_ranked_links(
+                content=content,
+                query=query,
+                run_id=run_id,
+                model=model,
+                articles=articles,
+            )
+        except RuntimeError as exc:
+            last_error = exc
+            if strict_json and should_retry_without_response_format(exc):
+                continue
+            raise
+
+    raise RuntimeError(f"OpenRouter request failed: {last_error}")
+
+
+def should_retry_without_response_format(exc: RuntimeError) -> bool:
+    message = str(exc)
+    return "пустой message.content" in message or "LLM вернула невалидный JSON" in message
+
+
+def request_openrouter(
+    *,
+    api_key: str,
+    body: dict[str, object],
+    timeout_seconds: int,
+) -> dict[str, object]:
     try:
-        payload = json.loads(
+        return json.loads(
             post_url(
                 OPENROUTER_CHAT_COMPLETIONS_URL,
                 body=json.dumps(body, ensure_ascii=False).encode("utf-8"),
@@ -39,15 +80,8 @@ def rank_articles_with_openrouter(
         )
     except RuntimeError as exc:
         raise RuntimeError(f"OpenRouter request failed: {exc}") from exc
-
-    content = extract_message_content(payload)
-    return parse_ranked_links(
-        content=content,
-        query=query,
-        run_id=run_id,
-        model=model,
-        articles=articles,
-    )
+    except json.JSONDecodeError as exc:
+        raise RuntimeError("OpenRouter вернул невалидный JSON-ответ API.") from exc
 
 
 def extract_message_content(payload: dict[str, object]) -> str:
@@ -63,10 +97,33 @@ def extract_message_content(payload: dict[str, object]) -> str:
     content = message.get("content")
     if isinstance(content, str) and content.strip():
         return content
-    raise RuntimeError("OpenRouter вернул пустой message.content.")
+    if isinstance(content, list):
+        parts = [
+            str(part.get("text", "")).strip()
+            for part in content
+            if isinstance(part, dict) and part.get("type") == "text"
+        ]
+        joined = "\n".join(part for part in parts if part)
+        if joined:
+            return joined
+    finish_reason = str(first_choice.get("finish_reason") or "")
+    raise RuntimeError(f"OpenRouter вернул пустой message.content. finish_reason={finish_reason}")
 
 
 def build_openrouter_request_body(
+    *,
+    model: str,
+    query: str,
+    articles: list[Article],
+    strict_json: bool,
+) -> dict[str, object]:
+    body = build_openrouter_messages(model=model, query=query, articles=articles)
+    if strict_json:
+        body["response_format"] = {"type": "json_object"}
+    return body
+
+
+def build_openrouter_messages(
     *,
     model: str,
     query: str,
@@ -90,8 +147,7 @@ def build_openrouter_request_body(
     return {
         "model": model,
         "temperature": 0.1,
-        "max_tokens": 1400,
-        "response_format": {"type": "json_object"},
+        "max_tokens": 15000,
         "messages": [
             {
                 "role": "system",
@@ -109,7 +165,7 @@ def build_openrouter_request_body(
                     "заданной теме. Шкала: 0.90-1.00 — материал прямо отвечает на запрос; "
                     "0.70-0.89 — сильная тематическая связь и есть ключевые факты по запросу; "
                     "0.40-0.69 — частичная или косвенная связь; 0.10-0.39 — слабая связь; "
-                    "0.00-0.09 — нерелевантно. reason пиши по-русски, до 220 символов, "
+                    "0.00-0.09 — нерелевантно. reason пиши по-русски, до 140 символов, "
                     "с конкретным основанием оценки."
                 ),
             },
@@ -175,15 +231,11 @@ def parse_ranked_links(
                 rank=int_or_default(item.get("rank"), index),
                 article_index=article_index,
                 title=(
-                    article.title
-                    if article is not None
-                    else str(item.get("title") or "").strip()
+                    article.title if article is not None else str(item.get("title") or "").strip()
                 ),
                 url=url,
                 source=(
-                    article.source
-                    if article is not None
-                    else str(item.get("source") or "").strip()
+                    article.source if article is not None else str(item.get("source") or "").strip()
                 ),
                 source_name=article.source_name if article is not None else "",
                 domain=article.domain if article is not None else "",

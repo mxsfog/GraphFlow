@@ -3,8 +3,18 @@ from __future__ import annotations
 from electromotiv_pipeline.config import get_bool_env
 from electromotiv_pipeline.google_news import deduplicate_articles, parse_google_news_rss
 from electromotiv_pipeline.google_sheets import ranked_link_to_row, sheet_range
+from electromotiv_pipeline.graph_api import (
+    empty_graph,
+    merge_edge_style,
+    merge_style,
+    notation_shape,
+)
 from electromotiv_pipeline.models import Article, RankedLink
-from electromotiv_pipeline.openrouter import parse_ranked_links
+from electromotiv_pipeline.openrouter import (
+    build_openrouter_request_body,
+    parse_ranked_links,
+    should_retry_without_response_format,
+)
 from electromotiv_pipeline.orientdb import orient_datetime, split_sql_statements
 
 
@@ -133,3 +143,65 @@ def test_get_bool_env(monkeypatch) -> None:
     monkeypatch.setenv("GOOGLE_SHEETS_ENABLED", "true")
 
     assert get_bool_env("GOOGLE_SHEETS_ENABLED", False) is True
+
+
+def test_openrouter_fallback_body_removes_response_format() -> None:
+    article = Article(
+        index=1,
+        title="Bitcoin prediction",
+        url="https://example.com/btc",
+        source="Example",
+        published_at="",
+        snippet="Bitcoin price forecast.",
+    )
+
+    strict_body = build_openrouter_request_body(
+        model="deepseek/deepseek-v4-flash",
+        query="Will Bitcoin hit 65k today",
+        articles=[article],
+        strict_json=True,
+    )
+    fallback_body = build_openrouter_request_body(
+        model="deepseek/deepseek-v4-flash",
+        query="Will Bitcoin hit 65k today",
+        articles=[article],
+        strict_json=False,
+    )
+
+    assert strict_body["response_format"] == {"type": "json_object"}
+    assert "response_format" not in fallback_body
+
+
+def test_openrouter_retries_on_invalid_llm_json() -> None:
+    assert should_retry_without_response_format(RuntimeError("LLM вернула невалидный JSON"))
+
+
+def test_graph_api_notation_shapes() -> None:
+    assert (
+        notation_shape(node_type="process", stored_shape="rounded_rectangle", notation="flow")
+        == "rounded_rectangle"
+    )
+    assert notation_shape(node_type="data", stored_shape="document", notation="flow") == "document"
+    assert notation_shape(node_type="actor", stored_shape="actor", notation="use_case") == "actor"
+    assert notation_shape(node_type="process", stored_shape="", notation="use_case") == "ellipse"
+    assert notation_shape(node_type="process", stored_shape="", notation="component") == "component"
+    assert notation_shape(node_type="process", stored_shape="", notation="class") == "class"
+
+
+def test_graph_api_use_case_style() -> None:
+    node_style = merge_style(
+        stored_style={},
+        shape=notation_shape(node_type="process", stored_shape="", notation="use_case"),
+        node_type="process",
+        notation="use_case",
+    )
+    edge_style = merge_edge_style(stored_style={}, edge_type="found", notation="use_case")
+
+    assert node_style["shape"] == "ellipse"
+    assert edge_style["strokeDasharray"] == "6 4"
+
+
+def test_graph_api_empty_payload() -> None:
+    payload = empty_graph(notation="flow", graph_id="latest")
+
+    assert payload == {"graph_id": "latest", "notation": "flow", "nodes": [], "edges": []}

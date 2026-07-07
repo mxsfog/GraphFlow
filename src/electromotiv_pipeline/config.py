@@ -133,9 +133,9 @@ def build_config(
         max_records=max_records or get_int_env("SEARCH_MAX_RECORDS", 5),
         openrouter_api_key=api_key,
         openrouter_model=model or os.environ.get("OPENROUTER_MODEL", DEFAULT_MODEL),
-        orientdb_url=(
-            orientdb_url or os.environ.get("ORIENTDB_URL", DEFAULT_ORIENTDB_URL)
-        ).rstrip("/"),
+        orientdb_url=(orientdb_url or os.environ.get("ORIENTDB_URL", DEFAULT_ORIENTDB_URL)).rstrip(
+            "/"
+        ),
         orientdb_database=database or os.environ.get("ORIENTDB_DATABASE", "news"),
         orientdb_auth_header=auth_header,
         output_path=resolved_output,

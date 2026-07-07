@@ -21,6 +21,7 @@ COMMANDS = {
     "check-orientdb": "command_check_orientdb",
     "ensure-schema": "command_ensure_schema",
     "dashboard": "command_dashboard",
+    "graph-api": "command_graph_api",
 }
 
 
@@ -96,6 +97,11 @@ def build_parser() -> argparse.ArgumentParser:
     add_common_config_args(dashboard_parser, include_query=False)
     dashboard_parser.add_argument("--host", default="127.0.0.1", help="Адрес панели просмотра.")
     dashboard_parser.add_argument("--port", type=int, default=8088, help="Порт панели просмотра.")
+
+    graph_api_parser = subparsers.add_parser("graph-api", help="Запустить API графов.")
+    add_common_config_args(graph_api_parser, include_query=False)
+    graph_api_parser.add_argument("--host", default="127.0.0.1", help="Адрес API графов.")
+    graph_api_parser.add_argument("--port", type=int, default=8090, help="Порт API графов.")
 
     return parser
 
@@ -181,7 +187,13 @@ def command_check_orientdb(args: argparse.Namespace) -> None:
     json_print(
         {
             name: client.count_class(name)
-            for name in ("SearchQuery", "SearchRun", "NewsLink", "Source", "Topic", "ModelRun")
+            for name in (
+                "SearchRun",
+                "NewsLink",
+                "Source",
+                "Topic",
+                "ModelRun",
+            )
         }
     )
 
@@ -195,6 +207,12 @@ def command_dashboard(args: argparse.Namespace) -> None:
     from electromotiv_pipeline.dashboard import run_dashboard
 
     run_dashboard(client=client_from_args(args), host=args.host, port=args.port)
+
+
+def command_graph_api(args: argparse.Namespace) -> None:
+    from electromotiv_pipeline.graph_api import run_graph_api
+
+    run_graph_api(client=client_from_args(args), host=args.host, port=args.port)
 
 
 def build_config_from_args(

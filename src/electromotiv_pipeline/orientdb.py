@@ -74,6 +74,11 @@ class OrientDBClient:
             raw_response=links[0].llm_raw_response if links else "",
         )
         topic_rid = self.create_or_get_vertex("Topic", {"name": query})
+        if run_rid and topic_rid:
+            self.create_edge("About", run_rid, topic_rid)
+        if run_rid and model_run_rid:
+            self.create_edge("AnalyzedBy", run_rid, model_run_rid)
+
         saved: list[SavedRecord] = []
         for link in links:
             news_rid = self.create_or_update_news_link(link)
@@ -86,14 +91,10 @@ class OrientDBClient:
             )
             if run_rid and news_rid:
                 self.create_edge("Found", run_rid, news_rid)
-                self.create_edge("FoundBy", run_rid, news_rid)
             if news_rid and source_rid:
                 self.create_edge("FromSource", news_rid, source_rid)
-            if news_rid and topic_rid:
-                self.create_edge("About", news_rid, topic_rid)
-            if news_rid and model_run_rid:
-                self.create_edge("AnalyzedBy", news_rid, model_run_rid)
-                self.create_edge("AnalyzedAs", news_rid, model_run_rid)
+            if model_run_rid and news_rid:
+                self.create_edge("AnalyzedAs", model_run_rid, news_rid)
             saved.append(SavedRecord(url=link.url, rid=news_rid))
         return saved
 
