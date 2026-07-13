@@ -10,6 +10,7 @@ electromotiv-practice-*.json
 .idea/
 .pytest_cache/
 .ruff_cache/
+.playwright-cli/
 __pycache__/
 *.pyc
 *.log

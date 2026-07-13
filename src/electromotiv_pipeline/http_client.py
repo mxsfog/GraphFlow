@@ -63,7 +63,7 @@ def request_url(
     body: bytes | None,
     timeout_seconds: int,
 ) -> bytes:
-    if should_use_windows_curl(url):
+    if should_use_windows_curl(url, headers=headers):
         return curl_request(
             method=method,
             url=url,
@@ -80,7 +80,10 @@ def request_url(
     )
 
 
-def should_use_windows_curl(url: str) -> bool:
+def should_use_windows_curl(url: str, *, headers: dict[str, str] | None = None) -> bool:
+    sensitive_headers = {"authorization", "proxy-authorization"}
+    if any(key.lower() in sensitive_headers for key in (headers or {})):
+        return False
     backend = os.environ.get("ELECTROMOTIV_HTTP_BACKEND", "auto").strip().lower()
     if backend == "urllib":
         return False
@@ -121,6 +124,8 @@ def urllib_request(
     except urllib.error.HTTPError as exc:
         error_body = exc.read().decode("utf-8", errors="replace")
         raise RuntimeError(f"HTTP {exc.code}: {error_body}") from exc
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        raise RuntimeError(f"Сетевая ошибка при обращении к {url}: {exc}") from exc
 
 
 def curl_request(
@@ -147,13 +152,16 @@ def curl_request(
         command.extend(["--data-binary", "@-"])
     command.append(url)
 
-    completed = subprocess.run(
-        command,
-        input=body,
-        capture_output=True,
-        timeout=timeout_seconds + 5,
-        check=False,
-    )
+    try:
+        completed = subprocess.run(
+            command,
+            input=body,
+            capture_output=True,
+            timeout=timeout_seconds + 5,
+            check=False,
+        )
+    except (subprocess.TimeoutExpired, OSError) as exc:
+        raise RuntimeError(f"HTTP curl backend failed: {exc}") from exc
     if completed.returncode != 0:
         stderr = completed.stderr.decode("utf-8", errors="replace").strip()
         stdout = completed.stdout.decode("utf-8", errors="replace").strip()

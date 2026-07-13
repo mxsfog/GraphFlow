@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+import shutil
 import subprocess
 import tempfile
 import urllib.parse
@@ -112,6 +113,11 @@ class GoogleSheetsClient:
         values = payload.get("values", [])
         if values and values[0] == list(SHEET_COLUMNS):
             return
+        if values:
+            raise RuntimeError(
+                "Первая строка Google Sheets не соответствует схеме проекта; "
+                "существующие данные не перезаписаны."
+            )
         self.put_json(
             f"{SHEETS_API}/{quote_path(self.spreadsheet_id)}/values/{range_name}"
             "?valueInputOption=RAW",
@@ -124,34 +130,37 @@ class GoogleSheetsClient:
         range_name = sheet_range(self.sheet_name, "A:L")
         self.post_json(
             f"{SHEETS_API}/{quote_path(self.spreadsheet_id)}/values/{range_name}:append"
-            "?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS",
+            "?valueInputOption=RAW&insertDataOption=INSERT_ROWS",
             {"values": rows},
         )
         return len(rows)
 
     def get_json(self, url: str) -> dict[str, object]:
-        return json.loads(
-            get_url(url, headers=self.auth_headers(), timeout_seconds=30).decode("utf-8")
+        return decode_json_object(
+            get_url(url, headers=self.auth_headers(), timeout_seconds=30),
+            context="Google Sheets GET",
         )
 
     def post_json(self, url: str, payload: dict[str, object]) -> dict[str, object]:
-        return json.loads(
+        return decode_json_object(
             post_url(
                 url,
                 headers={**self.auth_headers(), "Content-Type": "application/json"},
                 body=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
                 timeout_seconds=60,
-            ).decode("utf-8")
+            ),
+            context="Google Sheets POST",
         )
 
     def put_json(self, url: str, payload: dict[str, object]) -> dict[str, object]:
-        return json.loads(
+        return decode_json_object(
             put_url(
                 url,
                 headers={**self.auth_headers(), "Content-Type": "application/json"},
                 body=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
                 timeout_seconds=60,
-            ).decode("utf-8")
+            ),
+            context="Google Sheets PUT",
         )
 
     def auth_headers(self) -> dict[str, str]:
@@ -162,8 +171,12 @@ class GoogleSheetsClient:
 
 def load_service_account(path: Path) -> ServiceAccount:
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError as exc:
+        raw_payload = path.read_bytes()
+    except OSError as exc:
+        raise RuntimeError(f"Не удалось прочитать service account: {path}") from exc
+    try:
+        payload = decode_json_object(raw_payload, context=f"service account {path}")
+    except RuntimeError as exc:
         raise RuntimeError(f"Некорректный JSON service account: {path}") from exc
 
     client_email = str(payload.get("client_email") or "").strip()
@@ -186,13 +199,14 @@ def request_access_token(service_account: ServiceAccount) -> str:
             "assertion": assertion,
         }
     ).encode("utf-8")
-    payload = json.loads(
+    payload = decode_json_object(
         post_url(
             service_account.token_uri,
             headers={"Content-Type": "application/x-www-form-urlencoded"},
             body=body,
             timeout_seconds=60,
-        ).decode("utf-8")
+        ),
+        context="Google OAuth",
     )
     access_token = str(payload.get("access_token") or "").strip()
     if not access_token:
@@ -221,19 +235,31 @@ def build_jwt_assertion(service_account: ServiceAccount) -> str:
 
 
 def sign_rs256(payload: bytes, private_key: str) -> bytes:
-    fd, path = tempfile.mkstemp(prefix="electromotiv-google-sa-", suffix=".pem")
+    openssl = shutil.which("openssl")
+    if not openssl:
+        raise RuntimeError("Не найдена команда openssl, необходимая для Google OAuth.")
+    temp_dir = Path(os.environ.get("ELECTROMOTIV_TEMP_DIR", ".runtime/tmp"))
+    temp_dir.mkdir(parents=True, exist_ok=True)
+    fd, path = tempfile.mkstemp(
+        prefix="electromotiv-google-sa-",
+        suffix=".pem",
+        dir=temp_dir,
+    )
     try:
         os.write(fd, private_key.encode("utf-8"))
         os.close(fd)
         fd = -1
         os.chmod(path, 0o600)
-        completed = subprocess.run(
-            ["openssl", "dgst", "-sha256", "-sign", path],
-            input=payload,
-            capture_output=True,
-            check=False,
-            timeout=20,
-        )
+        try:
+            completed = subprocess.run(
+                [openssl, "dgst", "-sha256", "-sign", path],
+                input=payload,
+                capture_output=True,
+                check=False,
+                timeout=20,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise RuntimeError(f"Не удалось запустить openssl: {exc}") from exc
         if completed.returncode != 0:
             details = completed.stderr.decode("utf-8", errors="replace").strip()
             raise RuntimeError(f"Не удалось подписать JWT для Google OAuth: {details}")
@@ -279,3 +305,13 @@ def base64url_json(payload: dict[str, object]) -> str:
 
 def base64url_bytes(payload: bytes) -> str:
     return base64.urlsafe_b64encode(payload).decode("ascii").rstrip("=")
+
+
+def decode_json_object(payload: bytes, *, context: str) -> dict[str, object]:
+    try:
+        value = json.loads(payload.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise RuntimeError(f"{context} вернул невалидный JSON.") from exc
+    if not isinstance(value, dict):
+        raise RuntimeError(f"{context} должен вернуть JSON-объект.")
+    return value

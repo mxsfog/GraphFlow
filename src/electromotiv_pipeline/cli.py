@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
-from electromotiv_pipeline.config import DEFAULT_MODEL, build_config
+from electromotiv_pipeline.config import DEFAULT_SCHEMA_PATH, build_config
 from electromotiv_pipeline.google_news import fetch_news
 from electromotiv_pipeline.models import Article, RankedLink
 from electromotiv_pipeline.orientdb import OrientDBClient
@@ -22,6 +23,7 @@ COMMANDS = {
     "ensure-schema": "command_ensure_schema",
     "dashboard": "command_dashboard",
     "graph-api": "command_graph_api",
+    "decompose-document": "command_decompose_document",
 }
 
 
@@ -47,8 +49,8 @@ def build_parser() -> argparse.ArgumentParser:
     add_common_config_args(run_parser)
     run_parser.add_argument(
         "--model",
-        default=DEFAULT_MODEL,
-        help="Идентификатор модели OpenRouter.",
+        default=None,
+        help="Идентификатор модели OpenRouter. По умолчанию используется OPENROUTER_MODEL.",
     )
     run_parser.add_argument(
         "--no-save",
@@ -91,17 +93,38 @@ def build_parser() -> argparse.ArgumentParser:
 
     schema_parser = subparsers.add_parser("ensure-schema", help="Выполнить orientdb/schema.sql.")
     add_common_config_args(schema_parser, include_query=False)
-    schema_parser.add_argument("--schema", default="orientdb/schema.sql", help="Путь к SQL-схеме.")
+    schema_parser.add_argument(
+        "--schema",
+        default=str(DEFAULT_SCHEMA_PATH),
+        help="Путь к SQL-схеме.",
+    )
 
     dashboard_parser = subparsers.add_parser("dashboard", help="Запустить простой HTML dashboard.")
     add_common_config_args(dashboard_parser, include_query=False)
     dashboard_parser.add_argument("--host", default="127.0.0.1", help="Адрес панели просмотра.")
     dashboard_parser.add_argument("--port", type=int, default=8088, help="Порт панели просмотра.")
+    dashboard_parser.add_argument("--auth-user", default=None, help="Логин dashboard.")
 
     graph_api_parser = subparsers.add_parser("graph-api", help="Запустить API графов.")
     add_common_config_args(graph_api_parser, include_query=False)
     graph_api_parser.add_argument("--host", default="127.0.0.1", help="Адрес API графов.")
     graph_api_parser.add_argument("--port", type=int, default=8090, help="Порт API графов.")
+    graph_api_parser.add_argument("--auth-user", default=None, help="Логин Graph API.")
+
+    document_parser = subparsers.add_parser(
+        "decompose-document",
+        help="Декомпозировать текстовый документ через LLM и сохранить граф в OrientDB.",
+    )
+    add_common_config_args(document_parser, include_query=False)
+    document_parser.add_argument("--file", required=True, help="Путь к текстовому документу.")
+    document_parser.add_argument("--title", default=None, help="Название графа.")
+    document_parser.add_argument("--graph-id", default=None, help="Стабильный идентификатор графа.")
+    document_parser.add_argument("--model", default=None, help="Модель OpenRouter.")
+    document_parser.add_argument(
+        "--schema",
+        default=str(DEFAULT_SCHEMA_PATH),
+        help="Путь к SQL-схеме.",
+    )
 
     return parser
 
@@ -133,7 +156,11 @@ def add_common_config_args(
 
 def command_run(args: argparse.Namespace) -> None:
     if args.mock_llm:
-        config = build_config_from_args(args, require_openrouter=False)
+        config = build_config_from_args(
+            args,
+            require_openrouter=False,
+            require_orientdb=False,
+        )
         articles = fetch_news(config.query, config.max_records)
         ranked_links = mock_rank_articles(config.query, articles)
         write_output(config.output_path, ranked_links)
@@ -147,7 +174,11 @@ def command_run(args: argparse.Namespace) -> None:
         )
         return
 
-    config = build_config_from_args(args, require_openrouter=True)
+    config = build_config_from_args(
+        args,
+        require_openrouter=True,
+        require_orientdb=not args.no_save,
+    )
     ranked_links = run_pipeline(
         config=config,
         save_to_orientdb=not args.no_save,
@@ -165,7 +196,11 @@ def command_run(args: argparse.Namespace) -> None:
 
 
 def command_fetch_news(args: argparse.Namespace) -> None:
-    config = build_config_from_args(args, require_openrouter=False)
+    config = build_config_from_args(
+        args,
+        require_openrouter=False,
+        require_orientdb=False,
+    )
     articles = fetch_news(config.query, config.max_records)
     json_print(
         [
@@ -189,10 +224,15 @@ def command_check_orientdb(args: argparse.Namespace) -> None:
             name: client.count_class(name)
             for name in (
                 "SearchRun",
+                "SearchResult",
                 "NewsLink",
                 "Source",
                 "Topic",
                 "ModelRun",
+                "GraphDocument",
+                "GraphNode",
+                "GraphConnection",
+                "GraphAnnotation",
             )
         }
     )
@@ -205,20 +245,89 @@ def command_ensure_schema(args: argparse.Namespace) -> None:
 
 def command_dashboard(args: argparse.Namespace) -> None:
     from electromotiv_pipeline.dashboard import run_dashboard
+    from electromotiv_pipeline.graph_api import ApiAuth
 
-    run_dashboard(client=client_from_args(args), host=args.host, port=args.port)
+    run_dashboard(
+        client=client_from_args(args),
+        host=args.host,
+        port=args.port,
+        auth=graph_api_auth_from_args(args, auth_class=ApiAuth),
+    )
 
 
 def command_graph_api(args: argparse.Namespace) -> None:
-    from electromotiv_pipeline.graph_api import run_graph_api
+    from electromotiv_pipeline.graph_api import ApiAuth, run_graph_api
 
-    run_graph_api(client=client_from_args(args), host=args.host, port=args.port)
+    run_graph_api(
+        client=client_from_args(args),
+        host=args.host,
+        port=args.port,
+        auth=graph_api_auth_from_args(args, auth_class=ApiAuth),
+    )
+
+
+def command_decompose_document(args: argparse.Namespace) -> None:
+    from uuid import uuid4
+
+    from electromotiv_pipeline.document_graph import decompose_document_with_openrouter
+
+    document_path = Path(args.file)
+    try:
+        document_text = document_path.read_text(encoding="utf-8")
+    except OSError as exc:
+        raise RuntimeError(f"Не удалось прочитать документ: {document_path}") from exc
+    title = (args.title or document_path.stem).strip()
+    graph_id = (args.graph_id or f"document-{uuid4().hex[:12]}").strip()
+    config = build_config_from_args(
+        args,
+        require_openrouter=True,
+        require_orientdb=True,
+    )
+    client = OrientDBClient(
+        base_url=config.orientdb_url,
+        database=config.orientdb_database,
+        auth_header=config.orientdb_auth_header,
+    )
+    client.ensure_schema(Path(args.schema))
+    nodes, edges, _ = decompose_document_with_openrouter(
+        api_key=config.openrouter_api_key,
+        model=config.openrouter_model,
+        title=title,
+        text=document_text,
+    )
+    client.save_graph_document(
+        graph_id=graph_id,
+        title=title,
+        source_type=f"openrouter:{config.openrouter_model}",
+        nodes=nodes,
+        edges=edges,
+    )
+    json_print(
+        {
+            "graph_id": graph_id,
+            "nodes": len(nodes),
+            "edges": len(edges),
+            "model": config.openrouter_model,
+        },
+        indent=2,
+    )
+
+
+def graph_api_auth_from_args(args: argparse.Namespace, *, auth_class):
+    username = (args.auth_user or os.environ.get("GRAPH_API_USERNAME", "")).strip()
+    password = os.environ.get("GRAPH_API_PASSWORD", "").strip()
+    if not username or not password:
+        raise RuntimeError(
+            "Не заданы GRAPH_API_USERNAME и GRAPH_API_PASSWORD для защищенного Graph API."
+        )
+    return auth_class(username=username, password=password)
 
 
 def build_config_from_args(
     args: argparse.Namespace,
     *,
     require_openrouter: bool,
+    require_orientdb: bool = True,
 ):
     return build_config(
         env_file=Path(args.env_file),
@@ -230,6 +339,7 @@ def build_config_from_args(
         output_path=Path(args.output) if getattr(args, "output", None) else None,
         google_sheets_enabled=google_sheets_enabled_from_args(args),
         require_openrouter=require_openrouter,
+        require_orientdb=require_orientdb,
     )
 
 

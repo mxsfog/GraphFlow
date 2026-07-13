@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import urllib.parse
+from dataclasses import dataclass
 from html import escape
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+from electromotiv_pipeline.graph_api import ApiAuth, is_authorized
 from electromotiv_pipeline.orientdb import OrientDBClient
 
 COUNTS = ("SearchRun", "NewsLink", "Source", "ModelRun")
@@ -16,33 +19,47 @@ LINK_SQL = (
 )
 
 
-def run_dashboard(*, client: OrientDBClient, host: str, port: int) -> None:
-    server = ThreadingHTTPServer((host, port), handler_for(client))
+@dataclass(frozen=True)
+class HtmlCell:
+    value: str
+
+
+def run_dashboard(*, client: OrientDBClient, host: str, port: int, auth: ApiAuth) -> None:
+    server = ThreadingHTTPServer((host, port), handler_for(client, auth=auth))
     print(f"dashboard_url=http://{host}:{port}")
     server.serve_forever()
 
 
-def handler_for(client: OrientDBClient) -> type[BaseHTTPRequestHandler]:
+def handler_for(client: OrientDBClient, *, auth: ApiAuth) -> type[BaseHTTPRequestHandler]:
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:
             if self.path not in {"/", "/index.html"}:
                 self.send_error(404)
                 return
-            body = render_dashboard(client).encode("utf-8")
+            if not is_authorized(self.headers.get("Authorization"), auth):
+                self.send_response(401)
+                self.send_header("WWW-Authenticate", 'Basic realm="ElectroMotiv Dashboard"')
+                self.end_headers()
+                return
+            try:
+                body = render_dashboard(client).encode("utf-8")
+            except RuntimeError as exc:
+                self.send_error(503, explain=str(exc))
+                return
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)
 
-        def log_message(self, format: str, *args: object) -> None:
+        def log_message(self, _format: str, *args: object) -> None:
             return
 
     return Handler
 
 
 def render_dashboard(client: OrientDBClient) -> str:
-    counts = "".join(counter(name, safe_count(client, name)) for name in COUNTS)
+    counts = "".join(counter(name, client.count_class(name)) for name in COUNTS)
     runs = table(
         ("run", "model", "status", "candidates", "ranked", "saved", "finished"),
         [
@@ -65,18 +82,8 @@ def render_dashboard(client: OrientDBClient) -> str:
     return PAGE.format(counts=counts, runs=runs, links=links)
 
 
-def safe_count(client: OrientDBClient, class_name: str) -> int:
-    try:
-        return client.count_class(class_name)
-    except RuntimeError:
-        return 0
-
-
 def rows(client: OrientDBClient, sql: str) -> list[dict[str, object]]:
-    try:
-        result = client.command(sql).get("result", [])
-    except RuntimeError:
-        return []
+    result = client.command(sql).get("result", [])
     return [row for row in result if isinstance(row, dict)]
 
 
@@ -93,11 +100,17 @@ def table(headers: tuple[str, ...], data: list[tuple[object, ...]]) -> str:
 
 
 def link_row(row: dict[str, object]) -> tuple[object, ...]:
-    title = escape(str(row.get("title", "")))
-    url = escape(str(row.get("url", "")))
+    title = str(row.get("title", ""))
+    url = str(row.get("url", ""))
     source = row.get("source") or row.get("source_name", "")
+    parsed = urllib.parse.urlsplit(url)
+    title_cell: object = title
+    if parsed.scheme in {"http", "https"} and parsed.netloc:
+        title_cell = HtmlCell(
+            f'<a href="{escape(url, quote=True)}" rel="noopener noreferrer">{escape(title)}</a>'
+        )
     return (
-        f'<a href="{url}">{title}</a>',
+        title_cell,
         source,
         row.get("llm_score", ""),
         row.get("keywords", ""),
@@ -107,8 +120,9 @@ def link_row(row: dict[str, object]) -> tuple[object, ...]:
 
 
 def td(value: object) -> str:
-    text = str(value)
-    return f"<td>{text if '<a ' in text or '<br>' in text else escape(text)}</td>"
+    if isinstance(value, HtmlCell):
+        return f"<td>{value.value}</td>"
+    return f"<td>{escape(str(value))}</td>"
 
 
 PAGE = """<!doctype html>

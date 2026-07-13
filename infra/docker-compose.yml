@@ -2,7 +2,7 @@ name: electromotiv-orientdb
 
 services:
   orientdb:
-    image: orientdb:latest
+    image: orientdb@sha256:a9fbd14f78440a4e24e52fd2f483aff34be45118a2d8e56157c779ebd4b13536
     restart: unless-stopped
     ports:
       - "127.0.0.1:2424:2424"
@@ -12,6 +12,12 @@ services:
     volumes:
       - ../.runtime/orientdb/databases:/orientdb/databases
       - ../.runtime/orientdb/backup:/orientdb/backup
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/127.0.0.1/2480'"]
+      interval: 5s
+      timeout: 3s
+      retries: 24
+      start_period: 20s
     networks:
       - electromotiv
 

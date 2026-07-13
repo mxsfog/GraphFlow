@@ -1,39 +1,39 @@
-# Graph Frontend
+# ElectroMotiv Graph Frontend
 
-React Flow интерфейс для просмотра графа из OrientDB через backend API проекта.
+React 19 интерфейс для Graph API проекта. Визуализация и редактирование реализованы на `@xyflow/react`.
 
-## Запуск API
+## Запуск
 
-```bash
-cd /mnt/d/ElectroMotiv
-PYTHONPATH=src python3 -m electromotiv_pipeline graph-api --host 127.0.0.1 --port 8090
-```
-
-## Запуск frontend
+Сначала запустить OrientDB и Graph API из корня проекта, затем:
 
 ```bash
-cd /mnt/d/ElectroMotiv/frontend
-npm install
-npm run dev
+npm ci --prefix frontend
+npm run dev --prefix frontend
 ```
 
-Если API запущен не на `8090`:
+Открыть `http://127.0.0.1:5173`. Vite проксирует `/api` и `/health` на `http://127.0.0.1:8090`.
+
+Для входа используются `GRAPH_API_USERNAME` и `GRAPH_API_PASSWORD` из локального `.env`. Без успешной Basic Auth данные OrientDB не загружаются.
+
+## Возможности
+
+- выбор запуска поиска или пользовательского графа;
+- нотации Flow, UML Use Case, Component и Class;
+- zoom, перемещение и выбор элементов;
+- переключаемый Three.js 3D-режим с orbit-камерой и сохранением `position3d`;
+- фильтры по типам узлов и ребер;
+- раскладки Follow, Timeline и Structure;
+- редактирование label, type, shape, created at, image и properties;
+- сброс каждого поля и координат;
+- постоянное сохранение изменений в `GraphAnnotation`;
+- контроль конфликтов по revision;
+- создание редактируемой копии, узлов и ребер.
+
+## Проверки
 
 ```bash
-VITE_GRAPH_API_URL=http://127.0.0.1:8091 npm run dev
+npm run test --prefix frontend
+npm run build --prefix frontend
 ```
 
-Открыть:
-
-```text
-http://127.0.0.1:5173
-```
-
-## Нотации
-
-- `flow` - workflow-диаграмма.
-- `use_case` - UML Use Case, узлы отображаются эллипсами, связи подписываются `include`.
-- `component` - компонентная диаграмма.
-- `class` - диаграмма классов с секциями.
-
-По умолчанию интерфейс показывает реальный запуск пайплайна из OrientDB. Список запусков берется из `/api/search-runs`, граф - из `/api/graph/run/{run_id}`.
+Тесты проверяют направление Follow, группировку Timeline, дерево Structure и раскладку циклических компонент.

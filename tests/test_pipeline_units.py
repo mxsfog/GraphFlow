@@ -1,17 +1,37 @@
 from __future__ import annotations
 
-from electromotiv_pipeline.config import get_bool_env
-from electromotiv_pipeline.google_news import deduplicate_articles, parse_google_news_rss
-from electromotiv_pipeline.google_sheets import ranked_link_to_row, sheet_range
+from pathlib import Path
+
+import pytest
+
+from electromotiv_pipeline.cli import build_parser
+from electromotiv_pipeline.config import build_config, get_bool_env
+from electromotiv_pipeline.dashboard import link_row, td
+from electromotiv_pipeline.document_graph import parse_document_graph
+from electromotiv_pipeline.google_news import (
+    deduplicate_articles,
+    fetch_news,
+    parse_google_news_rss,
+)
+from electromotiv_pipeline.google_sheets import (
+    GoogleSheetsClient,
+    ServiceAccount,
+    ranked_link_to_row,
+    sheet_range,
+)
 from electromotiv_pipeline.graph_api import (
+    ApiAuth,
     empty_graph,
+    is_authorized,
     merge_edge_style,
     merge_style,
     notation_shape,
+    validate_annotation_payload,
 )
 from electromotiv_pipeline.models import Article, RankedLink
 from electromotiv_pipeline.openrouter import (
     build_openrouter_request_body,
+    clamp_score,
     parse_ranked_links,
     should_retry_without_response_format,
 )
@@ -176,6 +196,97 @@ def test_openrouter_retries_on_invalid_llm_json() -> None:
     assert should_retry_without_response_format(RuntimeError("LLM вернула невалидный JSON"))
 
 
+def test_openrouter_rejects_unknown_candidate_url() -> None:
+    article = Article(
+        index=1,
+        title="Known",
+        url="https://example.com/known",
+        source="Example",
+        published_at="",
+        snippet="Known candidate",
+    )
+    content = (
+        '{"results":[{"rank":1,"article_index":999,'
+        '"url":"javascript:alert(1)","llm_score":1,"reason":"Injected"}]}'
+    )
+
+    with pytest.raises(RuntimeError, match="валидного кандидата"):
+        parse_ranked_links(content=content, query="known", articles=[article])
+
+
+def test_openrouter_rejects_invalid_top_level_and_nan_score() -> None:
+    with pytest.raises(RuntimeError, match="JSON-объект"):
+        parse_ranked_links(content="null", query="test")
+    assert clamp_score("nan") == 0.0
+
+    article = Article(
+        index=1,
+        title="Known",
+        url="https://example.com/known",
+        source="Example",
+        published_at="",
+        snippet="Known candidate",
+    )
+    with pytest.raises(RuntimeError, match="валидного кандидата"):
+        parse_ranked_links(
+            content='{"results":[{"article_index":1,"llm_score":"nan"}]}',
+            query="test",
+            articles=[article],
+        )
+
+
+def test_fetch_news_reports_source_failure(monkeypatch) -> None:
+    def fail_request(*args, **kwargs):
+        raise RuntimeError("offline")
+
+    monkeypatch.setattr("electromotiv_pipeline.google_news.get_url", fail_request)
+
+    with pytest.raises(RuntimeError, match="Не удалось получить RSS"):
+        fetch_news("test", 5)
+
+
+def test_commands_without_orientdb_can_build_config(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.delenv("ORIENTDB_AUTH_HEADER", raising=False)
+    monkeypatch.delenv("ORIENTDB_ROOT_PASSWORD", raising=False)
+    config = build_config(
+        env_file=tmp_path / "missing.env",
+        query="test",
+        max_records=5,
+        model=None,
+        orientdb_url=None,
+        database=None,
+        output_path=None,
+        require_openrouter=False,
+        require_orientdb=False,
+    )
+    assert config.orientdb_auth_header == ""
+    assert build_parser().parse_args(["run"]).model is None
+
+
+def test_google_sheets_does_not_overwrite_foreign_header(monkeypatch) -> None:
+    client = GoogleSheetsClient(
+        spreadsheet_id="sheet",
+        sheet_name="news_links",
+        service_account=ServiceAccount("service@example.com", "key", "token"),
+    )
+    monkeypatch.setattr(client, "get_json", lambda url: {"values": [["foreign", "header"]]})
+
+    with pytest.raises(RuntimeError, match="не перезаписаны"):
+        client.ensure_header()
+
+
+def test_dashboard_escapes_untrusted_anchor_markup() -> None:
+    row = {
+        "title": "Title",
+        "url": "https://example.com",
+        "source": "<a href=x>source</a>",
+        "reason": "<a href=x>reason</a>",
+    }
+    rendered = [td(value) for value in link_row(row)]
+    assert "&lt;a href=x&gt;source" in rendered[1]
+    assert "&lt;a href=x&gt;reason" in rendered[4]
+
+
 def test_graph_api_notation_shapes() -> None:
     assert (
         notation_shape(node_type="process", stored_shape="rounded_rectangle", notation="flow")
@@ -201,7 +312,50 @@ def test_graph_api_use_case_style() -> None:
     assert edge_style["strokeDasharray"] == "6 4"
 
 
+def test_graph_api_validates_3d_position() -> None:
+    validate_annotation_payload(
+        "node",
+        {"position3d": {"x": 1.5, "y": -2, "z": 3}},
+    )
+    with pytest.raises(ValueError, match="position3d"):
+        validate_annotation_payload(
+            "node",
+            {"position3d": {"x": 1, "y": 2}},
+        )
+
+
 def test_graph_api_empty_payload() -> None:
     payload = empty_graph(notation="flow", graph_id="latest")
 
     assert payload == {"graph_id": "latest", "notation": "flow", "nodes": [], "edges": []}
+
+
+def test_graph_api_basic_auth() -> None:
+    import base64
+
+    token = base64.b64encode(b"admin:secret").decode("ascii")
+    auth = ApiAuth(username="admin", password="secret")
+
+    assert is_authorized(f"Basic {token}", auth)
+    assert not is_authorized("Basic broken", auth)
+    assert not is_authorized(None, auth)
+
+
+def test_parse_document_graph_accepts_markdown_fence() -> None:
+    content = """```json
+    {
+      "nodes": [
+        {"id": "section-1", "label": "Раздел", "type": "section", "shape": "document"},
+        {"id": "task-1", "label": "Задача", "type": "task"}
+      ],
+      "edges": [
+        {"id": "edge-1", "source": "section-1", "target": "task-1", "type": "include"}
+      ]
+    }
+    ```"""
+
+    nodes, edges, raw_content = parse_document_graph(content)
+
+    assert [node["id"] for node in nodes] == ["section-1", "task-1"]
+    assert edges[0]["type"] == "include"
+    assert raw_content == content

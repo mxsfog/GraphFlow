@@ -5,11 +5,11 @@
 Runtime-данные OrientDB примонтированы в каталог проекта:
 
 ```text
-D:\ElectroMotiv\.runtime\orientdb\databases
-D:\ElectroMotiv\.runtime\orientdb\backup
+D:\electromotiv\.runtime\orientdb\databases
+D:\electromotiv\.runtime\orientdb\backup
 ```
 
-Каталог `.runtime` не коммитится.
+В `.runtime` также находятся кэши `uv` и npm, временные файлы, логи и скомпилированные тестовые модули. Каталог не коммитится.
 
 ## Ограничение Docker
 

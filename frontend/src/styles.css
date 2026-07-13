@@ -14,7 +14,7 @@ body {
 
 .graph-page {
   display: grid;
-  grid-template-rows: auto 1fr;
+  grid-template-rows: auto auto minmax(0, 1fr);
   height: 100%;
 }
 
@@ -52,6 +52,33 @@ body {
   gap: 10px;
 }
 
+.view-mode {
+  display: inline-grid;
+  grid-template-columns: 1fr 1fr;
+  overflow: hidden;
+  border: 1px solid #94a3b8;
+  border-radius: 6px;
+  background: #ffffff;
+}
+
+.graph-toolbar .view-mode button {
+  min-width: 46px;
+  padding: 7px 10px;
+  border: 0;
+  border-radius: 0;
+  color: #334155;
+  background: #ffffff;
+}
+
+.graph-toolbar .view-mode button + button {
+  border-left: 1px solid #cbd5e1;
+}
+
+.graph-toolbar .view-mode button.is-active {
+  color: #ffffff;
+  background: #1d4ed8;
+}
+
 .graph-toolbar select {
   max-width: 520px;
   min-width: 190px;
@@ -61,18 +88,134 @@ body {
   background: #ffffff;
 }
 
+.graph-toolbar button,
+.login-form button,
+.property-editor button,
+.graph-filters button,
+.field-header button {
+  padding: 8px 12px;
+  border: 1px solid #1d4ed8;
+  border-radius: 6px;
+  color: #ffffff;
+  background: #2563eb;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.auth-user {
+  max-width: 180px;
+  overflow: hidden;
+  color: #475569;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .toolbar-controls select:first-child {
   width: min(520px, 40vw);
 }
 
+.save-status {
+  color: #0f766e;
+  font-size: 12px;
+  font-weight: 700;
+}
+
 .graph-layout {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 340px;
+  grid-template-columns: 260px minmax(0, 1fr) 360px;
   min-height: 0;
 }
 
+.graph-filters {
+  overflow: auto;
+  border-right: 1px solid #d7dde8;
+  background: #ffffff;
+  padding: 16px;
+}
+
+.filter-header,
+.property-editor-header,
+.field-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.filter-header h2 {
+  margin: 0;
+  font-size: 16px;
+}
+
+.filter-section {
+  display: grid;
+  gap: 8px;
+  padding: 14px 0;
+  border-bottom: 1px solid #e2e8f0;
+}
+
+.filter-section h3 {
+  margin: 0;
+  color: #334155;
+  font-size: 12px;
+  text-transform: uppercase;
+}
+
+.filter-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: #334155;
+  font-size: 13px;
+}
+
+.filter-option input {
+  width: 15px;
+  height: 15px;
+}
+
+.layout-actions {
+  display: grid;
+  gap: 8px;
+}
+
+.structure-editor {
+  display: grid;
+  gap: 8px;
+}
+
+.structure-editor input,
+.structure-editor select {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 7px 8px;
+  border: 1px solid #cbd5e1;
+  border-radius: 6px;
+  background: #ffffff;
+}
+
+.graph-filters button,
+.field-header button,
+.property-editor button {
+  padding: 6px 9px;
+  font-size: 12px;
+}
+
 .graph-canvas {
+  position: relative;
   min-height: 0;
+}
+
+.graph-loading {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  color: #334155;
+  background: rgb(248 250 252 / 82%);
+  font-weight: 700;
+  z-index: 20;
 }
 
 .graph-inspector {
@@ -87,6 +230,35 @@ body {
   font-size: 16px;
 }
 
+.graph-inspector label,
+.login-form label {
+  display: grid;
+  gap: 6px;
+  margin-bottom: 12px;
+  color: #334155;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.graph-inspector input,
+.graph-inspector select,
+.graph-inspector textarea,
+.login-form input {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 8px 10px;
+  border: 1px solid #cbd5e1;
+  border-radius: 6px;
+  color: #111827;
+  background: #ffffff;
+  font: inherit;
+}
+
+.graph-inspector textarea {
+  min-height: 76px;
+  resize: vertical;
+}
+
 .graph-inspector pre {
   overflow: auto;
   padding: 10px;
@@ -96,11 +268,177 @@ body {
   font-size: 12px;
 }
 
-.graph-error {
+.graph-error-slot {
+  min-height: 0;
+  padding: 0 18px;
+  color: transparent;
+  background: #ffffff;
+  font-size: 12px;
+  line-height: 0;
+}
+
+.graph-error-slot.has-error {
   padding: 10px 18px;
   border-bottom: 1px solid #fecaca;
   color: #991b1b;
   background: #fef2f2;
+  line-height: 1.4;
+}
+
+.login-page {
+  display: grid;
+  min-height: 100%;
+  place-items: center;
+  padding: 24px;
+  background: #eef2f7;
+}
+
+.login-form {
+  width: min(380px, 100%);
+  padding: 24px;
+  border: 1px solid #cbd5e1;
+  border-radius: 8px;
+  background: #ffffff;
+  box-shadow: 0 16px 40px rgb(15 23 42 / 12%);
+}
+
+.login-form h1 {
+  margin: 0 0 18px;
+  font-size: 22px;
+}
+
+.login-error {
+  margin-bottom: 12px;
+  padding: 8px 10px;
+  border: 1px solid #fecaca;
+  border-radius: 6px;
+  color: #991b1b;
+  background: #fef2f2;
+  font-size: 12px;
+}
+
+.inspector-section {
+  display: grid;
+  gap: 12px;
+}
+
+.property-editor {
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid #e2e8f0;
+  border-radius: 6px;
+  background: #f8fafc;
+}
+
+.property-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 8px;
+}
+
+.property-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.field-header {
+  width: 100%;
+}
+
+.field-header button {
+  border-color: #94a3b8;
+  color: #334155;
+  background: #ffffff;
+}
+
+.coordinate-editor {
+  display: grid;
+  gap: 6px;
+  color: #334155;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.coordinate-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.coordinate-row-3d {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.graph-3d {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  background: #111418;
+}
+
+.graph-3d canvas {
+  display: block;
+}
+
+.graph-3d-actions {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  z-index: 5;
+}
+
+.graph-3d-actions button {
+  padding: 7px 10px;
+  border: 1px solid #94a3b8;
+  border-radius: 6px;
+  color: #f8fafc;
+  background: rgb(17 20 24 / 88%);
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.graph-3d-legend {
+  position: absolute;
+  left: 12px;
+  bottom: 12px;
+  z-index: 5;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  max-width: calc(100% - 24px);
+  padding: 8px 10px;
+  border: 1px solid rgb(148 163 184 / 55%);
+  border-radius: 6px;
+  color: #e2e8f0;
+  background: rgb(17 20 24 / 86%);
+  font-size: 11px;
+}
+
+.graph-3d-legend span {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.graph-3d-legend i {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: #3b82f6;
+}
+
+.graph-3d-legend .legend-news {
+  background: #14b8a6;
+}
+
+.graph-3d-legend .legend-source {
+  background: #f97316;
+}
+
+.graph-3d-legend .legend-storage {
+  background: #94a3b8;
 }
 
 .notation-node {
@@ -153,6 +491,33 @@ body {
 .node-meta {
   color: #64748b;
   font-size: 11px;
+  overflow-wrap: anywhere;
+}
+
+.node-time {
+  color: #475569;
+  font-size: 10px;
+  overflow-wrap: anywhere;
+}
+
+.node-image {
+  width: 54px;
+  height: 54px;
+  object-fit: cover;
+  border: 1px solid #cbd5e1;
+  border-radius: 4px;
+}
+
+.node-properties {
+  display: grid;
+  gap: 2px;
+  width: 100%;
+  color: #334155;
+  font-size: 10px;
+  text-align: left;
+}
+
+.node-properties span {
   overflow-wrap: anywhere;
 }
 
@@ -278,6 +643,11 @@ body {
   padding-left: 26px;
 }
 
+.shape-database {
+  min-height: 96px;
+  border-radius: 50% / 12%;
+}
+
 .component-mark {
   position: absolute;
   top: 18px;
@@ -366,4 +736,43 @@ body {
 
 .react-flow__edge.animated path {
   stroke-dasharray: 9;
+}
+
+@media (max-width: 980px) {
+  .graph-page {
+    min-height: 100%;
+    height: auto;
+  }
+
+  .graph-toolbar,
+  .toolbar-controls {
+    flex-wrap: wrap;
+  }
+
+  .toolbar-controls,
+  .toolbar-controls select,
+  .toolbar-controls select:first-child {
+    width: 100%;
+    max-width: none;
+  }
+
+  .view-mode {
+    width: auto;
+  }
+
+  .graph-layout {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto minmax(65vh, 1fr) auto;
+  }
+
+  .graph-filters,
+  .graph-inspector {
+    max-height: 42vh;
+    border: 0;
+    border-bottom: 1px solid #d7dde8;
+  }
+
+  .graph-inspector {
+    border-top: 1px solid #d7dde8;
+  }
 }

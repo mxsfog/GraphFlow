@@ -2,30 +2,45 @@
 
 ## Назначение
 
-Пайплайн собирает новости из Google News RSS, удаляет дубли, оценивает релевантность через OpenRouter и сохраняет результат в OrientDB. При включенной настройке результат также записывается в Google Sheets.
-
-## Схема
-
-```text
-Google News RSS -> Python -> LLM OpenRouter -> OrientDB + Google Sheets
-```
+Пайплайн получает новости из Google News RSS, удаляет повторяющиеся URL, оценивает релевантность через OpenRouter и сохраняет результат в OrientDB. Google Sheets является дополнительным приемником результата.
 
 ## Запуск
 
 ```bash
-cd /mnt/d/ElectroMotiv
-PYTHONPATH=src python3 -m electromotiv_pipeline run --model deepseek/deepseek-v4-flash --ensure-schema
+cd /mnt/d/electromotiv
+bash scripts/run_python_pipeline.sh \
+  --query "Will Bitcoin be above 70000 dollars in August" \
+  --max-records 10 \
+  --ensure-schema \
+  --output outputs/bitcoin_august.json
 ```
 
-## Проверка без записи
+Модель задается в `OPENROUTER_MODEL`. Максимальный объем ответа OpenRouter установлен в коде и ограничен 15 000 токенов для новостного ранжирования.
 
-```bash
-PYTHONPATH=src python3 -m electromotiv_pipeline run --model deepseek/deepseek-v4-flash --no-save
-```
+## Алгоритм
 
-## Запись в Google Sheets
+1. Формируются несколько англоязычных вариантов запроса Google News RSS.
+2. Полученные статьи объединяются и дедуплицируются по URL.
+3. Заголовок и сниппет каждого кандидата передаются модели как недоверенные данные.
+4. LLM самостоятельно выделяет ключевые слова и оценивает соответствие запросу по шкале 0..1.
+5. Ответ проверяется как JSON-объект `{"results": [...]}`.
+6. Результаты с неизвестным `article_index`, произвольным URL, повтором или нечисловой оценкой отклоняются.
+7. Запуск и результаты сохраняются в OrientDB; при включенной настройке строки добавляются в Google Sheets.
 
-Настройки:
+Фиксированного списка предметных keywords и локальной формулы оценки нет. Поле `llm_score` является оценкой LLM, а `keywords` и `reason` объясняют ее основание.
+
+## Состояния запуска
+
+`SearchRun.status` принимает значения:
+
+- `running` - запись начата;
+- `success` - OrientDB и запрошенные приемники завершены;
+- `partial` - OrientDB сохранена, Google Sheets завершилась ошибкой;
+- `failed` - запись OrientDB завершилась ошибкой.
+
+Пустой RSS или отсутствие валидного результата LLM считаются ошибкой. Это исключает ложный успешный запуск с нулевым результатом.
+
+## Google Sheets
 
 ```env
 GOOGLE_SHEETS_ENABLED=true
@@ -34,48 +49,48 @@ GOOGLE_SHEETS_SHEET_NAME=news_links
 GOOGLE_SHEETS_SERVICE_ACCOUNT_FILE=key.txt
 ```
 
-Таблица должна быть расшарена на `client_email` из service account JSON с правом редактирования.
+Таблица должна быть доступна `client_email` service account с правом редактора. Значения добавляются через API в режиме `RAW`, поэтому строки, начинающиеся с `=`, `+`, `-` или `@`, не выполняются как формулы. Существующий несовместимый заголовок не перезаписывается.
 
-Разовый запуск без изменения `.env`:
-
-```bash
-PYTHONPATH=src python3 -m electromotiv_pipeline run --model deepseek/deepseek-v4-flash --ensure-schema --save-sheets
-```
-
-## Проверка базы
+Разовое включение:
 
 ```bash
-PYTHONPATH=src python3 -m electromotiv_pipeline check-orientdb
+bash scripts/run_python_pipeline.sh --query "query" --ensure-schema --save-sheets
 ```
 
-## Локальная панель просмотра
+## OrientDB
+
+Проверка соединения и счетчиков:
 
 ```bash
-PYTHONPATH=src python3 -m electromotiv_pipeline dashboard --host 127.0.0.1 --port 8088
+PYTHONPATH=src .venv/bin/python -m electromotiv_pipeline check-orientdb
 ```
 
-## Оценка релевантности
+Применение схемы:
 
-Оценка выполняется моделью OpenRouter по общим критериям соответствия текущему поисковому запросу.
+```bash
+PYTHONPATH=src .venv/bin/python -m electromotiv_pipeline ensure-schema
+```
 
-Пайплайн не использует жестко заданные доменные ключевые слова и не смешивает LLM-оценку с локальной формулой. Модель возвращает:
+Перед индексами выполняется недеструктивная миграция старых `Source` и `GraphAnnotation`: отсутствующие ключи и версии заполняются без удаления вершин и ребер.
 
-- `llm_score` - оценку релевантности от 0 до 1;
-- `keywords` - ключевые слова и сущности, которые модель сама выделила как основание оценки;
-- `reason` - краткое объяснение оценки.
+## Классы и связи
 
-## Хранимые классы
+`SearchRun -> Found -> SearchResult -> References -> NewsLink` отделяет каноническую ссылку от оценки конкретного запуска. Дополнительные связи: `FromSource`, `About`, `AnalyzedBy`, `AnalyzedAs`.
 
-- `SearchRun`
-- `NewsLink`
-- `Source`
-- `Topic`
-- `ModelRun`
+Графовый редактор использует `GraphDocument`, `GraphNode`, `GraphConnection` и `GraphAnnotation`.
 
-## Требования к эксплуатации
+## Безопасность
 
-- Не выводить и не коммитить `.env`.
-- Не коммитить `.runtime`.
-- Перед демонстрацией выполнить `ensure-schema`.
-- При ошибке `401` проверить ключ OpenRouter.
-- При ошибке `No endpoints found` проверить slug модели.
+- ключ OpenRouter, пароль OrientDB и service account не выводятся и не передаются как аргументы `curl`;
+- запросы с `Authorization` выполняются через Python HTTP-клиент;
+- URL из ответа LLM не принимается вместо URL исходного кандидата;
+- текст документа и RSS-сниппеты помечаются как недоверенные данные;
+- временный PEM-файл Google создается внутри `.runtime/tmp` на диске D.
+
+## Проверка без внешней LLM
+
+```bash
+bash scripts/run_python_pipeline.sh --query "oil market" --mock-llm --no-sheets
+```
+
+Этот режим предназначен только для smoke-теста RSS и формата результата. Он не подтверждает работу LLM-оценки.

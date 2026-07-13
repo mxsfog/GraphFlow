@@ -8,8 +8,10 @@ CREATE PROPERTY SearchRun.sources_count INTEGER;
 CREATE PROPERTY SearchRun.candidates_count INTEGER;
 CREATE PROPERTY SearchRun.ranked_count INTEGER;
 CREATE PROPERTY SearchRun.saved_count INTEGER;
+CREATE PROPERTY SearchRun.sheets_saved_count INTEGER;
 CREATE PROPERTY SearchRun.status STRING;
 CREATE PROPERTY SearchRun.error STRING;
+CREATE INDEX SearchRun.run_id UNIQUE;
 
 CREATE CLASS NewsLink EXTENDS V;
 CREATE PROPERTY NewsLink.run_id STRING;
@@ -24,24 +26,96 @@ CREATE PROPERTY NewsLink.llm_score DOUBLE;
 CREATE PROPERTY NewsLink.reason STRING;
 CREATE PROPERTY NewsLink.keywords STRING;
 CREATE PROPERTY NewsLink.created_at DATETIME;
+CREATE INDEX NewsLink.url UNIQUE;
+
+CREATE CLASS SearchResult EXTENDS V;
+CREATE PROPERTY SearchResult.result_id STRING;
+CREATE PROPERTY SearchResult.run_id STRING;
+CREATE PROPERTY SearchResult.url STRING;
+CREATE PROPERTY SearchResult.title STRING;
+CREATE PROPERTY SearchResult.source STRING;
+CREATE PROPERTY SearchResult.source_name STRING;
+CREATE PROPERTY SearchResult.published_at DATETIME;
+CREATE PROPERTY SearchResult.domain STRING;
+CREATE PROPERTY SearchResult.query STRING;
+CREATE PROPERTY SearchResult.rank INTEGER;
+CREATE PROPERTY SearchResult.article_index INTEGER;
+CREATE PROPERTY SearchResult.llm_score DOUBLE;
+CREATE PROPERTY SearchResult.reason STRING;
+CREATE PROPERTY SearchResult.keywords STRING;
+CREATE PROPERTY SearchResult.created_at DATETIME;
+CREATE INDEX SearchResult.result_id UNIQUE;
 
 CREATE CLASS Source EXTENDS V;
 CREATE PROPERTY Source.name STRING;
 CREATE PROPERTY Source.domain STRING;
+CREATE PROPERTY Source.source_key STRING;
 CREATE PROPERTY Source.created_at DATETIME;
+CREATE INDEX Source.source_key UNIQUE;
 
 CREATE CLASS Topic EXTENDS V;
 CREATE PROPERTY Topic.name STRING;
 CREATE PROPERTY Topic.created_at DATETIME;
+CREATE INDEX Topic.name UNIQUE;
 
 CREATE CLASS ModelRun EXTENDS V;
 CREATE PROPERTY ModelRun.run_id STRING;
 CREATE PROPERTY ModelRun.model STRING;
 CREATE PROPERTY ModelRun.raw_response STRING;
 CREATE PROPERTY ModelRun.created_at DATETIME;
+CREATE INDEX ModelRun.run_id UNIQUE;
 
 CREATE CLASS AnalyzedAs EXTENDS E;
 CREATE CLASS Found EXTENDS E;
 CREATE CLASS FromSource EXTENDS E;
 CREATE CLASS About EXTENDS E;
 CREATE CLASS AnalyzedBy EXTENDS E;
+CREATE CLASS References EXTENDS E;
+
+CREATE CLASS GraphAnnotation EXTENDS V;
+CREATE PROPERTY GraphAnnotation.graph_id STRING;
+CREATE PROPERTY GraphAnnotation.element_id STRING;
+CREATE PROPERTY GraphAnnotation.element_kind STRING;
+CREATE PROPERTY GraphAnnotation.notation STRING;
+CREATE PROPERTY GraphAnnotation.payload_json STRING;
+CREATE PROPERTY GraphAnnotation.revision INTEGER;
+CREATE PROPERTY GraphAnnotation.created_at DATETIME;
+CREATE PROPERTY GraphAnnotation.updated_at DATETIME;
+CREATE INDEX GraphAnnotation.key ON GraphAnnotation (graph_id, notation, element_kind, element_id) UNIQUE;
+
+CREATE CLASS GraphDocument EXTENDS V;
+CREATE PROPERTY GraphDocument.graph_id STRING;
+CREATE PROPERTY GraphDocument.title STRING;
+CREATE PROPERTY GraphDocument.source_type STRING;
+CREATE PROPERTY GraphDocument.created_at DATETIME;
+CREATE PROPERTY GraphDocument.updated_at DATETIME;
+CREATE INDEX GraphDocument.graph_id UNIQUE;
+
+CREATE CLASS GraphNode EXTENDS V;
+CREATE PROPERTY GraphNode.graph_id STRING;
+CREATE PROPERTY GraphNode.node_id STRING;
+CREATE PROPERTY GraphNode.label STRING;
+CREATE PROPERTY GraphNode.node_type STRING;
+CREATE PROPERTY GraphNode.shape STRING;
+CREATE PROPERTY GraphNode.created_at DATETIME;
+CREATE PROPERTY GraphNode.updated_at DATETIME;
+CREATE PROPERTY GraphNode.position_x INTEGER;
+CREATE PROPERTY GraphNode.position_y INTEGER;
+CREATE PROPERTY GraphNode.position_3d_x DOUBLE;
+CREATE PROPERTY GraphNode.position_3d_y DOUBLE;
+CREATE PROPERTY GraphNode.position_3d_z DOUBLE;
+CREATE PROPERTY GraphNode.image_data STRING;
+CREATE PROPERTY GraphNode.properties_json STRING;
+CREATE INDEX GraphNode.key ON GraphNode (graph_id, node_id) UNIQUE;
+
+CREATE CLASS GraphConnection EXTENDS E;
+CREATE PROPERTY GraphConnection.graph_id STRING;
+CREATE PROPERTY GraphConnection.edge_id STRING;
+CREATE PROPERTY GraphConnection.source_id STRING;
+CREATE PROPERTY GraphConnection.target_id STRING;
+CREATE PROPERTY GraphConnection.edge_type STRING;
+CREATE PROPERTY GraphConnection.label STRING;
+CREATE PROPERTY GraphConnection.properties_json STRING;
+CREATE PROPERTY GraphConnection.created_at DATETIME;
+CREATE PROPERTY GraphConnection.updated_at DATETIME;
+CREATE INDEX GraphConnection.key ON GraphConnection (graph_id, edge_id) UNIQUE;

@@ -7,6 +7,8 @@ from pathlib import Path
 DEFAULT_QUERY = "(oil OR crude OR Brent OR WTI) price spike market futures week"
 DEFAULT_MODEL = "deepseek/deepseek-v4-flash"
 DEFAULT_ORIENTDB_URL = "http://127.0.0.1:2480"
+DEFAULT_SCHEMA_PATH = Path(__file__).resolve().parents[2] / "orientdb" / "schema.sql"
+MAX_NEWS_RECORDS = 50
 
 
 @dataclass(frozen=True)
@@ -85,6 +87,7 @@ def build_config(
     output_path: Path | None,
     google_sheets_enabled: bool | None = None,
     require_openrouter: bool = True,
+    require_orientdb: bool = True,
 ) -> PipelineConfig:
     load_dotenv(env_file)
 
@@ -93,7 +96,7 @@ def build_config(
         raise RuntimeError("Не задан OPENROUTER_API_KEY. Без него LLM-оценка невозможна.")
 
     auth_header = os.environ.get("ORIENTDB_AUTH_HEADER", "").strip()
-    if not auth_header:
+    if not auth_header and require_orientdb:
         password = os.environ.get("ORIENTDB_ROOT_PASSWORD", "").strip()
         if not password:
             raise RuntimeError(
@@ -103,6 +106,12 @@ def build_config(
 
         token = base64.b64encode(f"root:{password}".encode()).decode("ascii")
         auth_header = f"Basic {token}"
+
+    resolved_max_records = (
+        max_records if max_records is not None else get_int_env("SEARCH_MAX_RECORDS", 5)
+    )
+    if not 1 <= resolved_max_records <= MAX_NEWS_RECORDS:
+        raise RuntimeError(f"Количество RSS-кандидатов должно быть от 1 до {MAX_NEWS_RECORDS}.")
 
     resolved_output = output_path or Path("outputs/python_news_links.json")
     sheets_enabled = (
@@ -130,7 +139,7 @@ def build_config(
 
     return PipelineConfig(
         query=query or os.environ.get("SEARCH_QUERY", DEFAULT_QUERY),
-        max_records=max_records or get_int_env("SEARCH_MAX_RECORDS", 5),
+        max_records=resolved_max_records,
         openrouter_api_key=api_key,
         openrouter_model=model or os.environ.get("OPENROUTER_MODEL", DEFAULT_MODEL),
         orientdb_url=(orientdb_url or os.environ.get("ORIENTDB_URL", DEFAULT_ORIENTDB_URL)).rstrip(

@@ -8,13 +8,37 @@ import {
   Node,
   Position,
   ReactFlow,
+  ReactFlowInstance,
   ReactFlowProvider,
+  useEdgesState,
+  useNodesState,
 } from '@xyflow/react';
 import '@xyflow/react/dist/style.css';
-import type { CSSProperties } from 'react';
-import { useEffect, useMemo, useState } from 'react';
+import type { CSSProperties, FormEvent } from 'react';
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import {
+  AuthError,
+  encodeBasicAuth,
+  loadJson,
+  saveAnnotation,
+  saveAnnotationsBatch,
+  saveCustomGraphDefinition,
+} from '../graphApiClient';
+import { arrangeGraphNodes, parseCreatedAt, type LayoutMode } from '../graphLayout';
+import type { Graph3DLink, Graph3DNode, Position3D } from './Graph3DView';
+
+const Graph3DView = lazy(() => import('./Graph3DView'));
 
 type Notation = 'flow' | 'use_case' | 'component' | 'class';
+type ViewMode = '2d' | '3d';
+type Selection = { kind: 'node' | 'edge'; id: string } | null;
+type AnnotationRequest = {
+  graphId: string;
+  notation: Notation;
+  elementId: string;
+  elementKind: 'node' | 'edge';
+  payload: Record<string, unknown>;
+};
 
 type GraphPayload = {
   graph_id: string;
@@ -56,11 +80,48 @@ type GraphViewerProps = {
   apiBaseUrl: string;
 };
 
+type EditableProperty = {
+  id: string;
+  key: string;
+  value: string;
+};
+
+type BaseNodeState = {
+  label: string;
+  shape: string;
+  imageUrl: string;
+  createdAt: string;
+  position: { x: number; y: number };
+  position3d: Position3D;
+  properties: EditableProperty[];
+};
+
+type BaseEdgeState = {
+  label: string;
+  edgeType: string;
+  properties: EditableProperty[];
+};
+
 type NotationNodeData = {
   label: string;
   shape: string;
   nodeType: string;
+  imageUrl: string;
+  createdAt: string;
+  position3d: Position3D;
+  properties: EditableProperty[];
+  annotationRevision: number;
+  base: BaseNodeState;
   style: Record<string, string | number>;
+  raw: Record<string, unknown>;
+};
+
+type EditableEdgeData = {
+  label: string;
+  edgeType: string;
+  properties: EditableProperty[];
+  annotationRevision: number;
+  base: BaseEdgeState;
   raw: Record<string, unknown>;
 };
 
@@ -75,54 +136,688 @@ const NOTATIONS: Array<{ value: Notation; label: string }> = [
   { value: 'class', label: 'Classes' },
 ];
 
+const SHAPES = [
+  'rounded_rectangle',
+  'document',
+  'diamond',
+  'ellipse',
+  'circle',
+  'actor',
+  'component',
+  'class',
+  'database',
+];
+
+const EDGE_TYPES = [
+  'request',
+  'found',
+  'score',
+  'from_source',
+  'about',
+  'analyzed_by',
+  'saved_to',
+  'exported_to',
+  'todo',
+  'follow',
+  'include',
+  'properties',
+  'decision',
+  'candidate',
+  'source',
+  'contains',
+  'reference',
+];
+const EDGE_TYPE_STYLES: Record<string, CSSProperties> = {
+  todo: { stroke: '#dc2626', strokeWidth: 3.6, strokeDasharray: '8 5' },
+  follow: { stroke: '#2563eb', strokeWidth: 3.8 },
+  include: { stroke: '#334155', strokeWidth: 3.0, strokeDasharray: '6 4' },
+  properties: { stroke: '#0f766e', strokeWidth: 3.2, strokeDasharray: '3 4' },
+  decision: { stroke: '#ea580c', strokeWidth: 3.4 },
+  from_source: { stroke: '#ea580c', strokeWidth: 3.2 },
+  source: { stroke: '#ea580c', strokeWidth: 3.2 },
+  about: { stroke: '#059669', strokeWidth: 3.2 },
+  score: { stroke: '#059669', strokeWidth: 3.2 },
+  contains: { stroke: '#059669', strokeWidth: 3.2 },
+  analyzed_by: { stroke: '#7c3aed', strokeWidth: 3.4 },
+};
+const DEFAULT_EDGE_TYPE_STYLE: CSSProperties = { stroke: '#475569', strokeWidth: 3.2 };
+const ANIMATED_EDGE_TYPES = new Set(['decision', 'follow', 'todo']);
+
 const nodeTypes = {
   notationNode: NotationNode,
   systemBoundary: SystemBoundary,
 };
 
 export function GraphViewer({ apiBaseUrl }: GraphViewerProps) {
+  const [authToken, setAuthToken] = useState('');
+  const [authUser, setAuthUser] = useState('');
+  const [loginForm, setLoginForm] = useState({ username: '', password: '' });
   const [notation, setNotation] = useState<Notation>('flow');
+  const [viewMode, setViewMode] = useState<ViewMode>('2d');
   const [runs, setRuns] = useState<SearchRunSummary[]>([]);
   const [selectedRunId, setSelectedRunId] = useState('');
   const [payload, setPayload] = useState<GraphPayload | null>(null);
-  const [selected, setSelected] = useState<NotationNodeData | null>(null);
+  const [selected, setSelected] = useState<Selection>(null);
   const [error, setError] = useState('');
+  const [isLoading, setIsLoading] = useState(false);
+  const [saveStatus, setSaveStatus] = useState('');
+  const [hiddenNodeTypes, setHiddenNodeTypes] = useState<string[]>([]);
+  const [hiddenEdgeTypes, setHiddenEdgeTypes] = useState<string[]>([]);
+  const [graphRefresh, setGraphRefresh] = useState(0);
+  const [flowInstance, setFlowInstance] = useState<ReactFlowInstance<Node<NotationNodeData>, Edge<EditableEdgeData>> | null>(null);
+  const [nodes, setNodes, onNodesChange] = useNodesState<Node<NotationNodeData>>([]);
+  const [edges, setEdges, onEdgesChange] = useEdgesState<Edge<EditableEdgeData>>([]);
+  const graphRequestGeneration = useRef(0);
+  const saveTimers = useRef(new Map<string, ReturnType<typeof setTimeout>>());
+  const saveQueues = useRef(new Map<string, Promise<void>>());
+  const latestSaveRequests = useRef(new Map<string, AnnotationRequest>());
+  const annotationRevisions = useRef(new Map<string, number>());
+  const pendingSaves = useRef(0);
+
+  const selectedNode = useMemo(
+    () => (selected?.kind === 'node' ? nodes.find((node) => node.id === selected.id) : undefined),
+    [nodes, selected],
+  );
+  const selectedEdge = useMemo(
+    () => (selected?.kind === 'edge' ? edges.find((edge) => edge.id === selected.id) : undefined),
+    [edges, selected],
+  );
+  const nodeTypeOptions = useMemo(() => uniqueValues(nodes.map((node) => node.data.nodeType)), [nodes]);
+  const edgeTypeOptions = useMemo(
+    () => uniqueValues(edges.map((edge) => edgeData(edge).edgeType)),
+    [edges],
+  );
+  const visibleNodes = useMemo(
+    () => nodes.filter((node) => !hiddenNodeTypes.includes(node.data.nodeType)),
+    [hiddenNodeTypes, nodes],
+  );
+  const visibleEdges = useMemo(() => {
+    const visibleNodeIds = new Set(visibleNodes.map((node) => node.id));
+    return edges.filter((edge) => {
+      const type = edgeData(edge).edgeType;
+      return (
+        visibleNodeIds.has(edge.source) &&
+        visibleNodeIds.has(edge.target) &&
+        !hiddenEdgeTypes.includes(type)
+      );
+    });
+  }, [edges, hiddenEdgeTypes, visibleNodes]);
+  const graph3dNodes = useMemo<Graph3DNode[]>(
+    () => visibleNodes
+      .filter((node) => !node.id.startsWith('__'))
+      .map((node) => ({
+        id: node.id,
+        label: node.data.label,
+        nodeType: node.data.nodeType,
+        shape: node.data.shape,
+        ...node.data.position3d,
+      })),
+    [visibleNodes],
+  );
+  const graph3dLinks = useMemo<Graph3DLink[]>(
+    () => visibleEdges.map((edge) => ({
+      id: edge.id,
+      source: edge.source,
+      target: edge.target,
+      label: edgeData(edge).label,
+      edgeType: edgeData(edge).edgeType,
+    })),
+    [visibleEdges],
+  );
 
   useEffect(() => {
+    if (selected?.kind === 'node' && !visibleNodes.some((node) => node.id === selected.id)) {
+      setSelected(null);
+    }
+    if (selected?.kind === 'edge' && !visibleEdges.some((edge) => edge.id === selected.id)) {
+      setSelected(null);
+    }
+  }, [selected, visibleEdges, visibleNodes]);
+
+  useEffect(() => {
+    if (!authToken) {
+      return;
+    }
     const controller = new AbortController();
     void loadJson<{ runs: SearchRunSummary[] }>(
       `${apiBaseUrl}/api/search-runs`,
       controller.signal,
+      authToken,
     )
       .then(({ runs }) => {
         setRuns(runs);
         setSelectedRunId((current) => current || defaultRunId(runs));
       })
-      .catch((error: Error) => {
-        if (error.name !== 'AbortError') {
-          setError(error.message);
-        }
-      });
+      .catch((requestError: Error) => handleRequestError(requestError, setAuthToken, setError));
     return () => controller.abort();
-  }, [apiBaseUrl]);
+  }, [apiBaseUrl, authToken]);
 
   useEffect(() => {
+    if (!authToken) {
+      return;
+    }
+    const generation = ++graphRequestGeneration.current;
     const controller = new AbortController();
     setError('');
+    setIsLoading(true);
+    setPayload(null);
+    setSelected(null);
     const graphUrl = selectedRunId
       ? `${apiBaseUrl}/api/graph/run/${encodeURIComponent(selectedRunId)}?notation=${notation}&limit=6`
       : `${apiBaseUrl}/api/graph/latest-run?notation=${notation}&limit=6`;
-    void loadJson<GraphPayload>(graphUrl, controller.signal)
-      .then(setPayload)
-      .catch((error: Error) => {
-        if (error.name !== 'AbortError') {
-          setError(error.message);
+    void loadJson<GraphPayload>(graphUrl, controller.signal, authToken)
+      .then((nextPayload) => {
+        if (generation === graphRequestGeneration.current) {
+          setPayload(nextPayload);
+        }
+      })
+      .catch((requestError: Error) => {
+        if (generation === graphRequestGeneration.current) {
+          handleRequestError(requestError, setAuthToken, setError);
+        }
+      })
+      .finally(() => {
+        if (generation === graphRequestGeneration.current) {
+          setIsLoading(false);
         }
       });
     return () => controller.abort();
-  }, [apiBaseUrl, notation, selectedRunId]);
+  }, [apiBaseUrl, authToken, graphRefresh, notation, selectedRunId]);
 
-  const { nodes, edges } = useMemo(() => toReactFlow(payload), [payload]);
+  useEffect(() => {
+    const graph = toReactFlow(payload);
+    setNodes(graph.nodes);
+    setEdges(graph.edges);
+    setSelected(null);
+    setSaveStatus('');
+    setHiddenNodeTypes([]);
+    setHiddenEdgeTypes([]);
+    for (const timer of saveTimers.current.values()) {
+      clearTimeout(timer);
+    }
+    saveTimers.current.clear();
+    latestSaveRequests.current.clear();
+    saveQueues.current.clear();
+    annotationRevisions.current.clear();
+    for (const node of graph.nodes) {
+      annotationRevisions.current.set(
+        annotationKey('node', node.id, notation),
+        node.data.annotationRevision,
+      );
+    }
+    for (const edge of graph.edges) {
+      annotationRevisions.current.set(
+        annotationKey('edge', edge.id, notation),
+        edgeData(edge).annotationRevision,
+      );
+    }
+  }, [notation, payload, setEdges, setNodes]);
+
+  const enqueueAnnotation = useCallback(
+    (request: AnnotationRequest) => {
+      const key = annotationKey(request.elementKind, request.elementId, request.notation);
+      const previous = saveQueues.current.get(key) || Promise.resolve();
+      pendingSaves.current += 1;
+      setSaveStatus('Сохранение...');
+      const current = previous
+        .catch(() => undefined)
+        .then(async () => {
+          const response = await saveAnnotation(apiBaseUrl, authToken, {
+            graph_id: request.graphId,
+            notation: request.notation,
+            element_id: request.elementId,
+            element_kind: request.elementKind,
+            revision: annotationRevisions.current.get(key) || 0,
+            payload: request.payload,
+          });
+          annotationRevisions.current.set(key, response.revision);
+          setError('');
+        })
+        .catch((requestError: Error) =>
+          handleRequestError(requestError, setAuthToken, setError, setSaveStatus),
+        )
+        .finally(() => {
+          pendingSaves.current = Math.max(0, pendingSaves.current - 1);
+          if (pendingSaves.current === 0) {
+            setSaveStatus('Сохранено');
+          }
+          if (saveQueues.current.get(key) === current) {
+            saveQueues.current.delete(key);
+          }
+        });
+      saveQueues.current.set(key, current);
+    },
+    [apiBaseUrl, authToken],
+  );
+
+  const scheduleAnnotation = useCallback(
+    (request: AnnotationRequest, immediate = false) => {
+      const key = annotationKey(request.elementKind, request.elementId, request.notation);
+      latestSaveRequests.current.set(key, request);
+      const activeTimer = saveTimers.current.get(key);
+      if (activeTimer) {
+        clearTimeout(activeTimer);
+      }
+      const flush = () => {
+        saveTimers.current.delete(key);
+        const latest = latestSaveRequests.current.get(key);
+        latestSaveRequests.current.delete(key);
+        if (latest) {
+          enqueueAnnotation(latest);
+        }
+      };
+      if (immediate) {
+        flush();
+      } else {
+        saveTimers.current.set(key, setTimeout(flush, 400));
+      }
+    },
+    [enqueueAnnotation],
+  );
+
+  const flushPendingAnnotations = useCallback(async () => {
+    for (const timer of saveTimers.current.values()) {
+      clearTimeout(timer);
+    }
+    saveTimers.current.clear();
+    const requests = [...latestSaveRequests.current.values()];
+    latestSaveRequests.current.clear();
+    requests.forEach(enqueueAnnotation);
+    await Promise.all([...saveQueues.current.values()]);
+  }, [enqueueAnnotation]);
+
+  const persistNode = useCallback(
+    (node: Node<NotationNodeData>, immediate = false) => {
+      if (!payload?.graph_id || node.id.startsWith('__')) {
+        return;
+      }
+      scheduleAnnotation(
+        {
+          graphId: payload.graph_id,
+          notation,
+          elementId: node.id,
+          elementKind: 'node',
+          payload: nodeAnnotationPayload(node),
+        },
+        immediate,
+      );
+    },
+    [notation, payload?.graph_id, scheduleAnnotation],
+  );
+
+  const persistEdge = useCallback(
+    (edge: Edge<EditableEdgeData>, immediate = false) => {
+      if (!payload?.graph_id) {
+        return;
+      }
+      scheduleAnnotation(
+        {
+          graphId: payload.graph_id,
+          notation,
+          elementId: edge.id,
+          elementKind: 'edge',
+          payload: edgeAnnotationPayload(edge),
+        },
+        immediate,
+      );
+    },
+    [notation, payload?.graph_id, scheduleAnnotation],
+  );
+
+  function submitLogin(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (!loginForm.username.trim() || !loginForm.password) {
+      setError('Введите логин и пароль Graph API.');
+      return;
+    }
+    setAuthUser(loginForm.username.trim());
+    setAuthToken(encodeBasicAuth(loginForm.username.trim(), loginForm.password));
+    setError('');
+  }
+
+  async function logout() {
+    await flushPendingAnnotations();
+    setAuthToken('');
+    setAuthUser('');
+    setPayload(null);
+    setRuns([]);
+    setNodes([]);
+    setEdges([]);
+    setSelected(null);
+    setLoginForm({ username: '', password: '' });
+    setSaveStatus('');
+  }
+
+  async function changeRun(runId: string) {
+    await flushPendingAnnotations();
+    setSelectedRunId(runId);
+  }
+
+  async function changeNotation(nextNotation: Notation) {
+    await flushPendingAnnotations();
+    setNotation(nextNotation);
+  }
+
+  function updateNode(id: string, patch: Partial<NotationNodeData>) {
+    const current = nodes.find((node) => node.id === id);
+    if (!current) {
+      return;
+    }
+    const next = { ...current, data: { ...current.data, ...patch } };
+    setNodes((currentNodes) => currentNodes.map((node) => (node.id === id ? next : node)));
+    persistNode(next);
+  }
+
+  function updateNodeProperty(id: string, propertyId: string, field: 'key' | 'value', value: string) {
+    const current = nodes.find((node) => node.id === id);
+    if (!current) {
+      return;
+    }
+    const properties = current.data.properties.map((property) =>
+      property.id === propertyId ? { ...property, [field]: value } : property,
+    );
+    const next = { ...current, data: { ...current.data, properties } };
+    setNodes((currentNodes) => currentNodes.map((node) => (node.id === id ? next : node)));
+    persistNode(next);
+  }
+
+  function addNodeProperty(id: string) {
+    const current = nodes.find((node) => node.id === id);
+    if (!current) {
+      return;
+    }
+    const next = {
+      ...current,
+      data: {
+        ...current.data,
+        properties: [...current.data.properties, newProperty()],
+      },
+    };
+    setNodes((currentNodes) => currentNodes.map((node) => (node.id === id ? next : node)));
+    persistNode(next);
+  }
+
+  function updateNodePosition(id: string, position: { x: number; y: number }) {
+    const current = nodes.find((node) => node.id === id);
+    if (!current) {
+      return;
+    }
+    const next = { ...current, position };
+    setNodes((currentNodes) => currentNodes.map((node) => (node.id === id ? next : node)));
+    persistNode(next);
+  }
+
+  function updateNodePosition3D(id: string, position3d: Position3D, immediate = false) {
+    const current = nodes.find((node) => node.id === id);
+    if (!current) {
+      return;
+    }
+    const next = { ...current, data: { ...current.data, position3d } };
+    setNodes((currentNodes) => currentNodes.map((node) => (node.id === id ? next : node)));
+    persistNode(next, immediate);
+  }
+
+  function resetNodeField(
+    id: string,
+    field:
+      | 'label'
+      | 'shape'
+      | 'imageUrl'
+      | 'createdAt'
+      | 'properties'
+      | 'position'
+      | 'position3d',
+  ) {
+    const current = nodes.find((node) => node.id === id);
+    if (!current) {
+      return;
+    }
+    const base = current.data.base;
+    const dataPatch =
+      field === 'properties'
+        ? { properties: base.properties }
+        : field === 'position'
+          ? {}
+          : { [field]: base[field] };
+    const next = {
+      ...current,
+      position: field === 'position' ? base.position : current.position,
+      data: { ...current.data, ...dataPatch },
+    };
+    setNodes((currentNodes) => currentNodes.map((node) => (node.id === id ? next : node)));
+    persistNode(next);
+  }
+
+  function updateEdge(id: string, patch: Partial<EditableEdgeData>) {
+    const current = edges.find((edge) => edge.id === id);
+    if (!current) {
+      return;
+    }
+    const data = edgeData(current);
+    const edgeType = patch.edgeType ?? data.edgeType;
+    const label = patch.label ?? data.label;
+    const next = withEdgePresentation(current, { ...data, ...patch, edgeType, label });
+    setEdges((currentEdges) => currentEdges.map((edge) => (edge.id === id ? next : edge)));
+    persistEdge(next);
+  }
+
+  function updateEdgeProperty(id: string, propertyId: string, field: 'key' | 'value', value: string) {
+    const current = edges.find((edge) => edge.id === id);
+    if (!current) {
+      return;
+    }
+    const data = edgeData(current);
+    const properties = data.properties.map((property) =>
+      property.id === propertyId ? { ...property, [field]: value } : property,
+    );
+    const next = { ...current, data: { ...data, properties } };
+    setEdges((currentEdges) => currentEdges.map((edge) => (edge.id === id ? next : edge)));
+    persistEdge(next);
+  }
+
+  function addEdgeProperty(id: string) {
+    const current = edges.find((edge) => edge.id === id);
+    if (!current) {
+      return;
+    }
+    const data = edgeData(current);
+    const next = {
+      ...current,
+      data: { ...data, properties: [...data.properties, newProperty()] },
+    };
+    setEdges((currentEdges) => currentEdges.map((edge) => (edge.id === id ? next : edge)));
+    persistEdge(next);
+  }
+
+  function resetEdgeField(id: string, field: 'label' | 'edgeType' | 'properties') {
+    const current = edges.find((edge) => edge.id === id);
+    if (!current) {
+      return;
+    }
+    const data = edgeData(current);
+    const base = data.base;
+    const edgeType = field === 'edgeType' ? base.edgeType : data.edgeType;
+    const label = field === 'label' ? base.label : data.label;
+    const properties = field === 'properties' ? base.properties : data.properties;
+    const next = withEdgePresentation(current, { ...data, edgeType, label, properties });
+    setEdges((currentEdges) => currentEdges.map((edge) => (edge.id === id ? next : edge)));
+    persistEdge(next);
+  }
+
+  function toggleNodeType(type: string) {
+    setHiddenNodeTypes((current) => toggleValue(current, type));
+  }
+
+  function toggleEdgeType(type: string) {
+    setHiddenEdgeTypes((current) => toggleValue(current, type));
+  }
+
+  async function saveGraphDefinition(
+    graphId: string,
+    title: string,
+    graphNodes: Node<NotationNodeData>[],
+    graphEdges: Edge<EditableEdgeData>[],
+  ) {
+    setSaveStatus('Сохранение графа...');
+    try {
+      await saveCustomGraphDefinition(apiBaseUrl, authToken, {
+        graph_id: graphId,
+        title,
+        source_type: 'manual',
+        nodes: graphNodes
+          .filter((node) => !node.id.startsWith('__'))
+          .map(customNodePayload),
+        edges: graphEdges.map(customEdgePayload),
+      });
+      setSelectedRunId(`graph:${graphId}`);
+      setGraphRefresh((value) => value + 1);
+      setError('');
+      setSaveStatus('Сохранено');
+    } catch (requestError) {
+      handleRequestError(requestError as Error, setAuthToken, setError, setSaveStatus);
+    }
+  }
+
+  function createEditableCopy() {
+    const graphId = `manual-${crypto.randomUUID?.() || Date.now()}`;
+    void saveGraphDefinition(graphId, payload?.title || 'Пользовательский граф', nodes, edges);
+  }
+
+  function addCustomNode(label: string, nodeType: string) {
+    if (!payload?.graph_id.startsWith('graph:')) {
+      return;
+    }
+    const nodeId = `node-${crypto.randomUUID?.() || Date.now()}`;
+    const base: BaseNodeState = {
+      label,
+      shape: 'rounded_rectangle',
+      imageUrl: '',
+      createdAt: new Date().toISOString(),
+      position: { x: 0, y: 0 },
+      position3d: { x: 0, y: 0, z: 0 },
+      properties: [],
+    };
+    const node: Node<NotationNodeData> = {
+      id: nodeId,
+      type: 'notationNode',
+      position: base.position,
+      data: {
+        label,
+        shape: base.shape,
+        nodeType,
+        imageUrl: '',
+        createdAt: base.createdAt,
+        position3d: base.position3d,
+        properties: [],
+        annotationRevision: 0,
+        base,
+        style: {},
+        raw: { class: 'GraphNode' },
+      },
+    };
+    void saveGraphDefinition(
+      payload.graph_id.replace(/^graph:/, ''),
+      payload.title || 'Пользовательский граф',
+      [...nodes, node],
+      edges,
+    );
+  }
+
+  function addCustomEdge(source: string, target: string, edgeType: string) {
+    if (!payload?.graph_id.startsWith('graph:') || source === target) {
+      return;
+    }
+    const edgeId = `edge-${crypto.randomUUID?.() || Date.now()}`;
+    const base: BaseEdgeState = { label: edgeType, edgeType, properties: [] };
+    const edge: Edge<EditableEdgeData> = {
+      id: edgeId,
+      source,
+      target,
+      label: edgeType,
+      type: 'smoothstep',
+      data: {
+        label: edgeType,
+        edgeType,
+        properties: [],
+        annotationRevision: 0,
+        base,
+        raw: { class: 'GraphConnection' },
+      },
+      style: edgeTypeStyle(edgeType),
+      markerEnd: { type: MarkerType.ArrowClosed },
+    };
+    void saveGraphDefinition(
+      payload.graph_id.replace(/^graph:/, ''),
+      payload.title || 'Пользовательский граф',
+      nodes,
+      [...edges, edge],
+    );
+  }
+
+  async function applyLayout(mode: LayoutMode) {
+    if (mode === 'follow' && !visibleEdges.some((edge) => edgeData(edge).edgeType === 'follow')) {
+      setError('Для раскладки Follow в текущем фильтре нет связей типа follow.');
+      return;
+    }
+    if (
+      mode === 'timeline'
+      && !visibleNodes.some((node) => parseCreatedAt(node.data.createdAt) !== Number.MAX_SAFE_INTEGER)
+    ) {
+      setError('Для Timeline заполните Created At хотя бы у одного узла.');
+      return;
+    }
+    await flushPendingAnnotations();
+
+    const arrangedVisible = arrangeNodes(visibleNodes, visibleEdges, mode);
+    const arrangedById = new Map(arrangedVisible.map((node) => [node.id, node]));
+    const arranged = nodes.map((node) => arrangedById.get(node.id) || node);
+    setNodes(arranged);
+    window.requestAnimationFrame(() => flowInstance?.fitView({ padding: 0.18, duration: 300 }));
+    if (!payload?.graph_id) {
+      return;
+    }
+    const items = arrangedVisible
+      .filter((node) => !node.id.startsWith('__'))
+      .map((node) => {
+        const key = annotationKey('node', node.id, notation);
+        return {
+          graph_id: payload.graph_id,
+          notation,
+          element_id: node.id,
+          element_kind: 'node' as const,
+          revision: annotationRevisions.current.get(key) || 0,
+          payload: { position: node.position },
+        };
+      });
+    if (items.length === 0) {
+      return;
+    }
+    setSaveStatus('Сохранение раскладки...');
+    try {
+      const response = await saveAnnotationsBatch(apiBaseUrl, authToken, items);
+      response.items.forEach((item) => {
+        annotationRevisions.current.set(
+          annotationKey(item.element_kind, item.element_id, notation),
+          item.revision,
+        );
+      });
+      setError('');
+      setSaveStatus('Сохранено');
+    } catch (requestError) {
+      handleRequestError(requestError as Error, setAuthToken, setError, setSaveStatus);
+    }
+  }
+
+  if (!authToken) {
+    return (
+      <LoginView
+        error={error}
+        loginForm={loginForm}
+        onChange={setLoginForm}
+        onSubmit={submitLogin}
+      />
+    );
+  }
 
   return (
     <ReactFlowProvider>
@@ -133,14 +828,33 @@ export function GraphViewer({ apiBaseUrl }: GraphViewerProps) {
               <h1>{payload?.title || 'Последний запуск пайплайна'}</h1>
             </div>
             <p>
-              {notationLabel(notation)} / {payload?.nodes.length ?? 0} nodes /{' '}
-              {payload?.edges.length ?? 0} edges
+              {notationLabel(notation)} / {visibleNodes.length} of {nodes.length} nodes /{' '}
+              {visibleEdges.length} of {edges.length} edges
             </p>
           </div>
           <div className="toolbar-controls">
+            {saveStatus ? <span className="save-status">{saveStatus}</span> : null}
+            <span className="auth-user">{authUser}</span>
+            <div className="view-mode" role="group" aria-label="Режим отображения">
+              <button
+                type="button"
+                className={viewMode === '2d' ? 'is-active' : ''}
+                onClick={() => setViewMode('2d')}
+              >
+                2D
+              </button>
+              <button
+                type="button"
+                className={viewMode === '3d' ? 'is-active' : ''}
+                onClick={() => setViewMode('3d')}
+              >
+                3D
+              </button>
+            </div>
             <select
               value={selectedRunId}
-              onChange={(event) => setSelectedRunId(event.target.value)}
+              disabled={isLoading}
+              onChange={(event) => void changeRun(event.target.value)}
             >
               {runs.map((run) => (
                 <option key={run.run_id} value={run.run_id}>
@@ -150,7 +864,8 @@ export function GraphViewer({ apiBaseUrl }: GraphViewerProps) {
             </select>
             <select
               value={notation}
-              onChange={(event) => setNotation(event.target.value as Notation)}
+              disabled={isLoading}
+              onChange={(event) => void changeNotation(event.target.value as Notation)}
             >
               {NOTATIONS.map((item) => (
                 <option key={item.value} value={item.value}>
@@ -158,86 +873,725 @@ export function GraphViewer({ apiBaseUrl }: GraphViewerProps) {
                 </option>
               ))}
             </select>
+            <button type="button" onClick={() => void logout()}>
+              Выйти
+            </button>
           </div>
         </header>
 
-        {error ? <div className="graph-error">{error}</div> : null}
+        <div className={`graph-error-slot${error ? ' has-error' : ''}`}>
+          {error || '\u00a0'}
+        </div>
 
         <main className="graph-layout">
+          <GraphFilters
+            nodeTypes={nodeTypeOptions}
+            edgeTypes={edgeTypeOptions}
+            hiddenNodeTypes={hiddenNodeTypes}
+            hiddenEdgeTypes={hiddenEdgeTypes}
+            onToggleNodeType={toggleNodeType}
+            onToggleEdgeType={toggleEdgeType}
+            onReset={() => {
+              setHiddenNodeTypes([]);
+              setHiddenEdgeTypes([]);
+            }}
+            onApplyLayout={applyLayout}
+            showLayouts={viewMode === '2d'}
+            editableGraph={Boolean(payload?.graph_id.startsWith('graph:'))}
+            nodeOptions={nodes
+              .filter((node) => !node.id.startsWith('__'))
+              .map((node) => ({ id: node.id, label: node.data.label }))}
+            onCreateCopy={createEditableCopy}
+            onAddNode={addCustomNode}
+            onAddEdge={addCustomEdge}
+          />
           <section className="graph-canvas" aria-label="Интерактивный граф">
-            <ReactFlow
-              nodes={nodes}
-              edges={edges}
-              nodeTypes={nodeTypes}
-              fitView
-              fitViewOptions={{ padding: 0.18 }}
-              minZoom={0.2}
-              maxZoom={2}
-              onNodeClick={(_, node) => setSelected(node.data as NotationNodeData)}
-              proOptions={{ hideAttribution: true }}
-            >
-              <Background />
-              <Controls />
-              <MiniMap pannable zoomable />
-            </ReactFlow>
+            {isLoading ? <div className="graph-loading">Загрузка графа...</div> : null}
+            {viewMode === '2d' ? (
+              <ReactFlow
+                nodes={visibleNodes}
+                edges={visibleEdges}
+                nodeTypes={nodeTypes}
+                onInit={setFlowInstance}
+                fitView
+                fitViewOptions={{ padding: 0.18 }}
+                minZoom={0.2}
+                maxZoom={2}
+                onNodesChange={onNodesChange}
+                onEdgesChange={onEdgesChange}
+                onNodeDragStop={(_, node) => persistNode(node as Node<NotationNodeData>, true)}
+                onNodeClick={(_, node) => setSelected({ kind: 'node', id: node.id })}
+                onEdgeClick={(_, edge) => setSelected({ kind: 'edge', id: edge.id })}
+                onPaneClick={() => setSelected(null)}
+                proOptions={{ hideAttribution: true }}
+              >
+                <Background />
+                <Controls />
+                <MiniMap pannable zoomable />
+              </ReactFlow>
+            ) : (
+              <Suspense fallback={<div className="graph-loading">Инициализация 3D...</div>}>
+                <Graph3DView
+                  nodes={graph3dNodes}
+                  links={graph3dLinks}
+                  selectedNodeId={selected?.kind === 'node' ? selected.id : undefined}
+                  selectedEdgeId={selected?.kind === 'edge' ? selected.id : undefined}
+                  onSelectNode={(id) => setSelected({ kind: 'node', id })}
+                  onSelectEdge={(id) => setSelected({ kind: 'edge', id })}
+                  onClearSelection={() => setSelected(null)}
+                  onNodePositionChange={(id, position) =>
+                    updateNodePosition3D(id, position, true)
+                  }
+                />
+              </Suspense>
+            )}
           </section>
 
-          <aside className="graph-inspector">
-            <h2>Выбранный узел</h2>
-            {selected ? (
-              <>
-                <strong>{selected.label}</strong>
-                <dl>
-                  <dt>type</dt>
-                  <dd>{selected.nodeType}</dd>
-                  <dt>shape</dt>
-                  <dd>{selected.shape}</dd>
-                </dl>
-                <pre>{JSON.stringify(selected.raw, null, 2)}</pre>
-              </>
-            ) : (
-              <p>Выберите узел на графе.</p>
-            )}
-          </aside>
+          <Inspector
+            selectedNode={isLoading ? undefined : selectedNode}
+            selectedEdge={isLoading ? undefined : selectedEdge}
+            onUpdateNode={updateNode}
+            onUpdateNodePosition={updateNodePosition}
+            onUpdateNodePosition3D={updateNodePosition3D}
+            onUpdateNodeProperty={updateNodeProperty}
+            onAddNodeProperty={addNodeProperty}
+            onResetNodeField={resetNodeField}
+            onUpdateEdge={updateEdge}
+            onUpdateEdgeProperty={updateEdgeProperty}
+            onAddEdgeProperty={addEdgeProperty}
+            onResetEdgeField={resetEdgeField}
+            onError={setError}
+          />
         </main>
       </div>
     </ReactFlowProvider>
   );
 }
 
-async function loadJson<T>(url: string, signal: AbortSignal): Promise<T> {
-  const response = await fetch(url, { signal });
-  if (!response.ok) {
-    throw new Error(`Graph API вернул HTTP ${response.status}`);
-  }
-  return (await response.json()) as T;
+function LoginView({
+  error,
+  loginForm,
+  onChange,
+  onSubmit,
+}: {
+  error: string;
+  loginForm: { username: string; password: string };
+  onChange: (value: { username: string; password: string }) => void;
+  onSubmit: (event: FormEvent<HTMLFormElement>) => void;
+}) {
+  return (
+    <div className="login-page">
+      <form className="login-form" onSubmit={onSubmit}>
+        <h1>ElectroMotiv Graph</h1>
+        <label>
+          Логин
+          <input
+            value={loginForm.username}
+            autoComplete="username"
+            onChange={(event) => onChange({ ...loginForm, username: event.target.value })}
+          />
+        </label>
+        <label>
+          Пароль
+          <input
+            value={loginForm.password}
+            type="password"
+            autoComplete="current-password"
+            onChange={(event) => onChange({ ...loginForm, password: event.target.value })}
+          />
+        </label>
+        {error ? <div className="login-error">{error}</div> : null}
+        <button type="submit">Войти</button>
+      </form>
+    </div>
+  );
 }
 
-function toReactFlow(payload: GraphPayload | null): { nodes: Node[]; edges: Edge[] } {
+function GraphFilters({
+  nodeTypes,
+  edgeTypes,
+  hiddenNodeTypes,
+  hiddenEdgeTypes,
+  onToggleNodeType,
+  onToggleEdgeType,
+  onReset,
+  onApplyLayout,
+  showLayouts,
+  editableGraph,
+  nodeOptions,
+  onCreateCopy,
+  onAddNode,
+  onAddEdge,
+}: {
+  nodeTypes: string[];
+  edgeTypes: string[];
+  hiddenNodeTypes: string[];
+  hiddenEdgeTypes: string[];
+  onToggleNodeType: (type: string) => void;
+  onToggleEdgeType: (type: string) => void;
+  onReset: () => void;
+  onApplyLayout: (mode: LayoutMode) => void;
+  showLayouts: boolean;
+  editableGraph: boolean;
+  nodeOptions: Array<{ id: string; label: string }>;
+  onCreateCopy: () => void;
+  onAddNode: (label: string, nodeType: string) => void;
+  onAddEdge: (source: string, target: string, edgeType: string) => void;
+}) {
+  const [nodeLabel, setNodeLabel] = useState('Новый узел');
+  const [nodeType, setNodeType] = useState('process');
+  const [edgeSource, setEdgeSource] = useState('');
+  const [edgeTarget, setEdgeTarget] = useState('');
+  const [newEdgeType, setNewEdgeType] = useState('follow');
+  useEffect(() => {
+    if (!nodeOptions.some((node) => node.id === edgeSource)) {
+      setEdgeSource(nodeOptions[0]?.id || '');
+    }
+    if (!nodeOptions.some((node) => node.id === edgeTarget)) {
+      setEdgeTarget(nodeOptions[1]?.id || nodeOptions[0]?.id || '');
+    }
+  }, [edgeSource, edgeTarget, nodeOptions]);
+  return (
+    <aside className="graph-filters">
+      <div className="filter-header">
+        <h2>Фильтры</h2>
+        <button type="button" onClick={onReset}>
+          Сбросить
+        </button>
+      </div>
+      <section className="filter-section">
+        <h3>Типы узлов</h3>
+        {nodeTypes.map((type) => (
+          <label className="filter-option" key={type}>
+            <input
+              type="checkbox"
+              checked={!hiddenNodeTypes.includes(type)}
+              onChange={() => onToggleNodeType(type)}
+            />
+            {type}
+          </label>
+        ))}
+      </section>
+      <section className="filter-section">
+        <h3>Типы ребер</h3>
+        {edgeTypes.map((type) => (
+          <label className="filter-option" key={type}>
+            <input
+              type="checkbox"
+              checked={!hiddenEdgeTypes.includes(type)}
+              onChange={() => onToggleEdgeType(type)}
+            />
+            {type}
+          </label>
+        ))}
+      </section>
+      {showLayouts ? (
+        <section className="filter-section">
+          <h3>Раскладка</h3>
+          <div className="layout-actions">
+            <button type="button" onClick={() => onApplyLayout('follow')}>
+              Follow слева направо
+            </button>
+            <button type="button" onClick={() => onApplyLayout('timeline')}>
+              Timeline
+            </button>
+            <button type="button" onClick={() => onApplyLayout('structure')}>
+              Structure дерево
+            </button>
+          </div>
+        </section>
+      ) : null}
+      <section className="filter-section">
+        <h3>Редактирование структуры</h3>
+        {!editableGraph ? (
+          <button type="button" onClick={onCreateCopy}>
+            Создать редактируемую копию
+          </button>
+        ) : (
+          <div className="structure-editor">
+            <input value={nodeLabel} onChange={(event) => setNodeLabel(event.target.value)} />
+            <select value={nodeType} onChange={(event) => setNodeType(event.target.value)}>
+              <option value="process">process</option>
+              <option value="section">section</option>
+              <option value="task">task</option>
+              <option value="milestone">milestone</option>
+              <option value="result">result</option>
+            </select>
+            <button type="button" onClick={() => onAddNode(nodeLabel.trim() || 'Новый узел', nodeType)}>
+              Добавить узел
+            </button>
+            <select value={edgeSource} onChange={(event) => setEdgeSource(event.target.value)}>
+              {nodeOptions.map((node) => <option key={node.id} value={node.id}>{node.label}</option>)}
+            </select>
+            <select value={edgeTarget} onChange={(event) => setEdgeTarget(event.target.value)}>
+              {nodeOptions.map((node) => <option key={node.id} value={node.id}>{node.label}</option>)}
+            </select>
+            <select value={newEdgeType} onChange={(event) => setNewEdgeType(event.target.value)}>
+              {EDGE_TYPES.map((type) => <option key={type} value={type}>{type}</option>)}
+            </select>
+            <button
+              type="button"
+              disabled={!edgeSource || !edgeTarget || edgeSource === edgeTarget}
+              onClick={() => onAddEdge(edgeSource, edgeTarget, newEdgeType)}
+            >
+              Добавить ребро
+            </button>
+          </div>
+        )}
+      </section>
+    </aside>
+  );
+}
+
+function Inspector({
+  selectedNode,
+  selectedEdge,
+  onUpdateNode,
+  onUpdateNodePosition,
+  onUpdateNodePosition3D,
+  onUpdateNodeProperty,
+  onAddNodeProperty,
+  onResetNodeField,
+  onUpdateEdge,
+  onUpdateEdgeProperty,
+  onAddEdgeProperty,
+  onResetEdgeField,
+  onError,
+}: {
+  selectedNode?: Node<NotationNodeData>;
+  selectedEdge?: Edge<EditableEdgeData>;
+  onUpdateNode: (id: string, patch: Partial<NotationNodeData>) => void;
+  onUpdateNodePosition: (id: string, position: { x: number; y: number }) => void;
+  onUpdateNodePosition3D: (id: string, position: Position3D) => void;
+  onUpdateNodeProperty: (
+    id: string,
+    propertyId: string,
+    field: 'key' | 'value',
+    value: string,
+  ) => void;
+  onAddNodeProperty: (id: string) => void;
+  onResetNodeField: (
+    id: string,
+    field:
+      | 'label'
+      | 'shape'
+      | 'imageUrl'
+      | 'createdAt'
+      | 'properties'
+      | 'position'
+      | 'position3d',
+  ) => void;
+  onUpdateEdge: (id: string, patch: Partial<EditableEdgeData>) => void;
+  onUpdateEdgeProperty: (
+    id: string,
+    propertyId: string,
+    field: 'key' | 'value',
+    value: string,
+  ) => void;
+  onAddEdgeProperty: (id: string) => void;
+  onResetEdgeField: (id: string, field: 'label' | 'edgeType' | 'properties') => void;
+  onError: (message: string) => void;
+}) {
+  return (
+    <aside className="graph-inspector">
+      <h2>Свойства</h2>
+      {selectedNode ? (
+        <NodeEditor
+          node={selectedNode}
+          onUpdate={onUpdateNode}
+          onUpdatePosition={onUpdateNodePosition}
+          onUpdatePosition3D={onUpdateNodePosition3D}
+          onUpdateProperty={onUpdateNodeProperty}
+          onAddProperty={onAddNodeProperty}
+          onResetField={onResetNodeField}
+          onError={onError}
+        />
+      ) : null}
+      {selectedEdge ? (
+        <EdgeEditor
+          edge={selectedEdge}
+          onUpdate={onUpdateEdge}
+          onUpdateProperty={onUpdateEdgeProperty}
+          onAddProperty={onAddEdgeProperty}
+          onResetField={onResetEdgeField}
+        />
+      ) : null}
+      {!selectedNode && !selectedEdge ? <p>Выберите узел или стрелку на графе.</p> : null}
+    </aside>
+  );
+}
+
+function NodeEditor({
+  node,
+  onUpdate,
+  onUpdatePosition,
+  onUpdatePosition3D,
+  onUpdateProperty,
+  onAddProperty,
+  onResetField,
+  onError,
+}: {
+  node: Node<NotationNodeData>;
+  onUpdate: (id: string, patch: Partial<NotationNodeData>) => void;
+  onUpdatePosition: (id: string, position: { x: number; y: number }) => void;
+  onUpdatePosition3D: (id: string, position: Position3D) => void;
+  onUpdateProperty: (id: string, propertyId: string, field: 'key' | 'value', value: string) => void;
+  onAddProperty: (id: string) => void;
+  onResetField: (
+    id: string,
+    field:
+      | 'label'
+      | 'shape'
+      | 'imageUrl'
+      | 'createdAt'
+      | 'properties'
+      | 'position'
+      | 'position3d',
+  ) => void;
+  onError: (message: string) => void;
+}) {
+  return (
+    <div className="inspector-section">
+      <label>
+        <FieldHeader title="Label" onReset={() => onResetField(node.id, 'label')} />
+        <textarea
+          value={node.data.label}
+          onChange={(event) => onUpdate(node.id, { label: event.target.value })}
+        />
+      </label>
+      <label>
+        <FieldHeader title="Shape" onReset={() => onResetField(node.id, 'shape')} />
+        <select
+          value={node.data.shape}
+          onChange={(event) => onUpdate(node.id, { shape: event.target.value })}
+        >
+          {SHAPES.map((shape) => (
+            <option key={shape} value={shape}>
+              {shape}
+            </option>
+          ))}
+        </select>
+      </label>
+      <label>
+        <FieldHeader title="Image URL" onReset={() => onResetField(node.id, 'imageUrl')} />
+        <DraftInput
+          value={node.data.imageUrl}
+          onCommit={(imageUrl) => onUpdate(node.id, { imageUrl })}
+        />
+      </label>
+      <label>
+        Image file
+        <input
+          type="file"
+          accept="image/png,image/jpeg,image/webp,image/gif"
+          onChange={(event) => {
+            const file = event.target.files?.[0];
+            if (!file) {
+              return;
+            }
+            void readImageFile(file)
+              .then((imageUrl) => onUpdate(node.id, { imageUrl }))
+              .catch((fileError: Error) => onError(fileError.message));
+          }}
+        />
+      </label>
+      <label>
+        <FieldHeader title="Created At" onReset={() => onResetField(node.id, 'createdAt')} />
+        <input
+          value={node.data.createdAt}
+          onChange={(event) => onUpdate(node.id, { createdAt: event.target.value })}
+        />
+      </label>
+      <div className="coordinate-editor">
+        <FieldHeader title="2D coordinates" onReset={() => onResetField(node.id, 'position')} />
+        <div className="coordinate-row">
+          <label>
+            X
+            <CoordinateInput
+              value={node.position.x}
+              onCommit={(x) =>
+                onUpdatePosition(node.id, {
+                  x,
+                  y: node.position.y,
+                })
+              }
+            />
+          </label>
+          <label>
+            Y
+            <CoordinateInput
+              value={node.position.y}
+              onCommit={(y) =>
+                onUpdatePosition(node.id, {
+                  x: node.position.x,
+                  y,
+                })
+              }
+            />
+          </label>
+        </div>
+      </div>
+      <div className="coordinate-editor">
+        <FieldHeader title="3D coordinates" onReset={() => onResetField(node.id, 'position3d')} />
+        <div className="coordinate-row coordinate-row-3d">
+          {(['x', 'y', 'z'] as const).map((axis) => (
+            <label key={axis}>
+              {axis.toUpperCase()}
+              <CoordinateInput
+                value={node.data.position3d[axis]}
+                onCommit={(value) =>
+                  onUpdatePosition3D(node.id, { ...node.data.position3d, [axis]: value })
+                }
+              />
+            </label>
+          ))}
+        </div>
+      </div>
+      <PropertyEditor
+        properties={node.data.properties}
+        onChange={(propertyId, field, value) => onUpdateProperty(node.id, propertyId, field, value)}
+        onAdd={() => onAddProperty(node.id)}
+        onReset={() => onResetField(node.id, 'properties')}
+      />
+      <pre>{JSON.stringify(node.data.raw, null, 2)}</pre>
+    </div>
+  );
+}
+
+function EdgeEditor({
+  edge,
+  onUpdate,
+  onUpdateProperty,
+  onAddProperty,
+  onResetField,
+}: {
+  edge: Edge<EditableEdgeData>;
+  onUpdate: (id: string, patch: Partial<EditableEdgeData>) => void;
+  onUpdateProperty: (id: string, propertyId: string, field: 'key' | 'value', value: string) => void;
+  onAddProperty: (id: string) => void;
+  onResetField: (id: string, field: 'label' | 'edgeType' | 'properties') => void;
+}) {
+  const currentEdgeType = edge.data?.edgeType || '';
+  const edgeTypes = EDGE_TYPES.includes(currentEdgeType)
+    ? EDGE_TYPES
+    : [currentEdgeType, ...EDGE_TYPES].filter(Boolean);
+  return (
+    <div className="inspector-section">
+      <label>
+        <FieldHeader title="Label" onReset={() => onResetField(edge.id, 'label')} />
+        <textarea
+          value={edge.data?.label || ''}
+          onChange={(event) => onUpdate(edge.id, { label: event.target.value })}
+        />
+      </label>
+      <label>
+        <FieldHeader title="Type" onReset={() => onResetField(edge.id, 'edgeType')} />
+        <select
+          value={edge.data?.edgeType || ''}
+          onChange={(event) => onUpdate(edge.id, { edgeType: event.target.value })}
+        >
+          {edgeTypes.map((type) => (
+            <option key={type} value={type}>
+              {type}
+            </option>
+          ))}
+        </select>
+      </label>
+      <PropertyEditor
+        properties={edge.data?.properties || []}
+        onChange={(propertyId, field, value) => onUpdateProperty(edge.id, propertyId, field, value)}
+        onAdd={() => onAddProperty(edge.id)}
+        onReset={() => onResetField(edge.id, 'properties')}
+      />
+      <pre>{JSON.stringify(edge.data?.raw || {}, null, 2)}</pre>
+    </div>
+  );
+}
+
+function PropertyEditor({
+  properties,
+  onChange,
+  onAdd,
+  onReset,
+}: {
+  properties: EditableProperty[];
+  onChange: (propertyId: string, field: 'key' | 'value', value: string) => void;
+  onAdd: () => void;
+  onReset: () => void;
+}) {
+  return (
+    <div className="property-editor">
+      <div className="property-editor-header">
+        <strong>Properties</strong>
+        <div className="property-actions">
+          <button type="button" onClick={onReset}>
+            Сброс
+          </button>
+          <button type="button" onClick={onAdd}>
+            Добавить
+          </button>
+        </div>
+      </div>
+      {properties.map((property) => (
+        <div className="property-row" key={property.id}>
+          <input
+            value={property.key}
+            placeholder="key"
+            onChange={(event) => onChange(property.id, 'key', event.target.value)}
+          />
+          <input
+            value={property.value}
+            placeholder="value"
+            onChange={(event) => onChange(property.id, 'value', event.target.value)}
+          />
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function FieldHeader({ title, onReset }: { title: string; onReset: () => void }) {
+  return (
+    <span className="field-header">
+      <span>{title}</span>
+      <button type="button" onClick={onReset}>
+        Сброс
+      </button>
+    </span>
+  );
+}
+
+function DraftInput({
+  value,
+  onCommit,
+}: {
+  value: string;
+  onCommit: (value: string) => void;
+}) {
+  const [draft, setDraft] = useState(value);
+  useEffect(() => setDraft(value), [value]);
+  return (
+    <input
+      value={draft}
+      onChange={(event) => setDraft(event.target.value)}
+      onBlur={() => onCommit(draft.trim())}
+      onKeyDown={(event) => {
+        if (event.key === 'Enter') {
+          event.currentTarget.blur();
+        }
+      }}
+    />
+  );
+}
+
+function CoordinateInput({
+  value,
+  onCommit,
+}: {
+  value: number;
+  onCommit: (value: number) => void;
+}) {
+  const [draft, setDraft] = useState(String(Math.round(value)));
+  useEffect(() => setDraft(String(Math.round(value))), [value]);
+  function commit() {
+    const parsed = Number(draft);
+    if (draft.trim() && Number.isFinite(parsed)) {
+      onCommit(parsed);
+    } else {
+      setDraft(String(Math.round(value)));
+    }
+  }
+  return (
+    <input
+      type="number"
+      value={draft}
+      onChange={(event) => setDraft(event.target.value)}
+      onBlur={commit}
+      onKeyDown={(event) => {
+        if (event.key === 'Enter') {
+          event.currentTarget.blur();
+        }
+      }}
+    />
+  );
+}
+
+function handleRequestError(
+  error: Error,
+  setAuthToken: (value: string) => void,
+  setError: (value: string) => void,
+  setSaveStatus?: (value: string) => void,
+) {
+  if (error.name === 'AbortError') {
+    return;
+  }
+  setSaveStatus?.('');
+  if (error instanceof AuthError) {
+    setAuthToken('');
+    setError('Неверный логин или пароль Graph API.');
+    return;
+  }
+  setError(error.message);
+}
+
+function toReactFlow(payload: GraphPayload | null): {
+  nodes: Node<NotationNodeData>[];
+  edges: Edge<EditableEdgeData>[];
+} {
   if (!payload) {
     return { nodes: [], edges: [] };
   }
-  const graphNodes: Node[] = payload.nodes.map((node) => ({
-    id: node.id,
-    type: 'notationNode',
-    position: node.position,
-    data: {
-      label: node.label,
-      shape: node.shape,
-      nodeType: node.type,
-      style: node.style,
-      raw: node.data,
-    } satisfies NotationNodeData,
-    draggable: true,
-    zIndex: 2,
-  }));
+  const graphNodes: Node<NotationNodeData>[] = payload.nodes.map((node) => {
+    const base = nodeBase(node);
+    return {
+      id: node.id,
+      type: 'notationNode',
+      position: node.position,
+      data: {
+        label: node.label,
+        shape: node.shape,
+        nodeType: node.type,
+        imageUrl: stringField(node.data.imageUrl || node.data.image_url),
+        createdAt: stringField(node.data.created_at || node.data.createdAt),
+        position3d: position3DField(node.data.position3d, base.position3d),
+        properties: propertiesFromUnknown(node.data.properties),
+        annotationRevision: numberField(node.data.annotation_revision),
+        base,
+        style: node.style,
+        raw: node.data,
+      },
+      draggable: true,
+      zIndex: 2,
+    };
+  });
 
   if (payload.notation === 'use_case') {
+    const boundaryLabel = payload.title || 'Система';
     graphNodes.unshift({
       id: '__system_boundary',
       type: 'systemBoundary',
       position: { x: -80, y: -120 },
-      data: { label: 'Система поиска и анализа новостей' } satisfies SystemBoundaryData,
+      data: {
+        label: boundaryLabel,
+        shape: 'boundary',
+        nodeType: 'boundary',
+        imageUrl: '',
+        createdAt: '',
+        position3d: { x: 0, y: 0, z: 0 },
+        properties: [],
+        annotationRevision: 0,
+        base: {
+          label: boundaryLabel,
+          shape: 'boundary',
+          imageUrl: '',
+          createdAt: '',
+          position: { x: -80, y: -120 },
+          position3d: { x: 0, y: 0, z: 0 },
+          properties: [],
+        },
+        style: {},
+        raw: {},
+      },
       draggable: false,
       selectable: false,
       zIndex: 0,
@@ -247,27 +1601,38 @@ function toReactFlow(payload: GraphPayload | null): { nodes: Node[]; edges: Edge
 
   return {
     nodes: graphNodes,
-    edges: payload.edges.map((edge) => ({
-      id: edge.id,
-      source: edge.source,
-      target: edge.target,
-      label: edge.label,
-      type: 'smoothstep',
-      animated: edge.type === 'decision',
-      style: edgeStyle(edge),
-      sourceHandle: sourceHandle(edge),
-      targetHandle: targetHandle(edge),
-      markerEnd: {
-        type: MarkerType.ArrowClosed,
-        color: String(edge.style.stroke || '#475569'),
-        width: 22,
-        height: 22,
-      },
-      labelBgPadding: [8, 4],
-      labelBgBorderRadius: 4,
-      labelBgStyle: { fill: '#ffffff', fillOpacity: 0.92 },
-      labelStyle: { fill: '#334155', fontSize: 12, fontWeight: 600 },
-    })),
+    edges: payload.edges.map((edge) => {
+      const base = edgeBase(edge);
+      return {
+        id: edge.id,
+        source: edge.source,
+        target: edge.target,
+        label: edge.label,
+        type: 'smoothstep',
+        animated: isAnimatedEdge(edge.type),
+        data: {
+          label: edge.label,
+          edgeType: edge.type,
+          properties: propertiesFromUnknown(edge.data.properties),
+          annotationRevision: numberField(edge.data.annotation_revision),
+          base,
+          raw: edge.data,
+        },
+        style: edgeStyle(edge),
+        sourceHandle: sourceHandle(edge),
+        targetHandle: targetHandle(edge),
+        markerEnd: {
+          type: MarkerType.ArrowClosed,
+          color: String(edge.style.stroke || '#475569'),
+          width: 22,
+          height: 22,
+        },
+        labelBgPadding: [8, 4],
+        labelBgBorderRadius: 4,
+        labelBgStyle: { fill: '#ffffff', fillOpacity: 0.92 },
+        labelStyle: { fill: '#334155', fontSize: 12, fontWeight: 600 },
+      };
+    }),
   };
 }
 
@@ -282,9 +1647,22 @@ function NotationNode({ data }: { data: NotationNodeData }) {
       {data.shape === 'actor' ? <ActorNode label={data.label} /> : null}
       {data.shape !== 'actor' ? (
         <div className="node-content">
+          {data.imageUrl ? (
+            <img
+              className="node-image"
+              src={data.imageUrl}
+              alt=""
+              referrerPolicy="no-referrer"
+              onError={(event) => {
+                event.currentTarget.hidden = true;
+              }}
+            />
+          ) : null}
           <div className="node-label">{data.label}</div>
+          {data.createdAt ? <div className="node-time">{data.createdAt}</div> : null}
           {data.shape !== 'class' ? <div className="node-meta">{meta}</div> : null}
           {data.shape === 'class' ? <ClassSections raw={data.raw} /> : null}
+          {data.properties.length > 0 ? <NodeProperties properties={data.properties} /> : null}
         </div>
       ) : null}
       {data.shape === 'component' ? <span className="component-mark" /> : null}
@@ -351,7 +1729,18 @@ function ClassSections({ raw }: { raw: Record<string, unknown> }) {
   const explicitAttributes = Array.isArray(raw.attributes) ? raw.attributes.map(String) : [];
   const methods = Array.isArray(raw.methods) ? raw.methods.map(String) : [];
   const fallbackAttributes = Object.entries(raw)
-    .filter(([key]) => key !== 'attributes' && key !== 'methods')
+    .filter(
+      ([key]) =>
+        ![
+          'attributes',
+          'methods',
+          'annotation',
+          'annotation_revision',
+          'base',
+          'properties',
+          'imageUrl',
+        ].includes(key),
+    )
     .map(([key, value]) => `${key}: ${String(value)}`);
   const attributes = explicitAttributes.length > 0 ? explicitAttributes : fallbackAttributes;
   return (
@@ -367,6 +1756,20 @@ function ClassSections({ raw }: { raw: Record<string, unknown> }) {
         ))}
       </div>
     </>
+  );
+}
+
+function NodeProperties({ properties }: { properties: EditableProperty[] }) {
+  return (
+    <div className="node-properties">
+      {properties
+        .filter((property) => property.key || property.value)
+        .map((property) => (
+          <span key={property.id}>
+            {property.key}: {property.value}
+          </span>
+        ))}
+    </div>
   );
 }
 
@@ -389,20 +1792,28 @@ function edgeStyle(edge: GraphApiEdge) {
 }
 
 function sourceHandle(edge: GraphApiEdge): string {
-  if (edge.type === 'saved_to' || edge.type === 'exported_to') {
+  return sourceHandleForType(edge.type);
+}
+
+function sourceHandleForType(edgeType: string): string {
+  if (edgeType === 'saved_to' || edgeType === 'exported_to') {
     return 'bottom-source';
   }
-  if (edge.type === 'about') {
+  if (edgeType === 'about') {
     return 'bottom-source';
   }
   return 'right-source';
 }
 
 function targetHandle(edge: GraphApiEdge): string {
-  if (edge.type === 'score') {
+  return targetHandleForType(edge.type);
+}
+
+function targetHandleForType(edgeType: string): string {
+  if (edgeType === 'score') {
     return 'bottom-target';
   }
-  if (edge.type === 'about' || edge.type === 'saved_to' || edge.type === 'exported_to') {
+  if (edgeType === 'about' || edgeType === 'saved_to' || edgeType === 'exported_to') {
     return 'top-target';
   }
   return 'left-target';
@@ -433,4 +1844,238 @@ function runOptionLabel(run: SearchRunSummary): string {
 
 function defaultRunId(runs: SearchRunSummary[]): string {
   return runs.find((run) => run.ranked_count >= 4)?.run_id || runs[0]?.run_id || '';
+}
+
+function newProperty(): EditableProperty {
+  const id = crypto.randomUUID ? crypto.randomUUID() : String(Date.now());
+  return { id, key: '', value: '' };
+}
+
+function edgeData(edge: Edge<EditableEdgeData>): EditableEdgeData {
+  const edgeType = String(edge.type || '');
+  return (
+    edge.data || {
+      label: String(edge.label || ''),
+      edgeType,
+      properties: [],
+      annotationRevision: 0,
+      base: { label: String(edge.label || ''), edgeType, properties: [] },
+      raw: {},
+    }
+  );
+}
+
+function nodeAnnotationPayload(node: Node<NotationNodeData>): Record<string, unknown> {
+  return {
+    label: node.data.label,
+    shape: node.data.shape,
+    imageUrl: node.data.imageUrl,
+    createdAt: node.data.createdAt,
+    properties: node.data.properties,
+    position: {
+      x: Math.round(node.position.x),
+      y: Math.round(node.position.y),
+    },
+    position3d: node.data.position3d,
+  };
+}
+
+function customNodePayload(node: Node<NotationNodeData>): Record<string, unknown> {
+  return {
+    id: node.id,
+    label: node.data.label,
+    type: node.data.nodeType,
+    shape: node.data.shape,
+    created_at: node.data.createdAt,
+    x: Math.round(node.position.x),
+    y: Math.round(node.position.y),
+    position3d: node.data.position3d,
+    image_data: node.data.imageUrl,
+    properties: node.data.properties,
+  };
+}
+
+function customEdgePayload(edge: Edge<EditableEdgeData>): Record<string, unknown> {
+  const data = edgeData(edge);
+  return {
+    id: edge.id,
+    source: edge.source,
+    target: edge.target,
+    type: data.edgeType,
+    label: data.label,
+    properties: data.properties,
+  };
+}
+
+function edgeAnnotationPayload(edge: Edge<EditableEdgeData>): Record<string, unknown> {
+  const data = edgeData(edge);
+  return {
+    label: data.label,
+    edgeType: data.edgeType,
+    properties: data.properties,
+  };
+}
+
+function nodeBase(node: GraphApiNode): BaseNodeState {
+  const base = recordField(node.data.base);
+  return {
+    label: stringField(base.label) || node.label,
+    shape: stringField(base.shape) || node.shape,
+    imageUrl: stringField(base.imageUrl),
+    createdAt: stringField(base.createdAt),
+    position: positionField(base.position, node.position),
+    position3d: position3DField(base.position3d, position3DField(node.data.position3d)),
+    properties: propertiesFromUnknown(base.properties),
+  };
+}
+
+function edgeBase(edge: GraphApiEdge): BaseEdgeState {
+  const base = recordField(edge.data.base);
+  return {
+    label: stringField(base.label) || edge.label,
+    edgeType: stringField(base.edgeType) || edge.type,
+    properties: propertiesFromUnknown(base.properties),
+  };
+}
+
+function propertiesFromUnknown(value: unknown): EditableProperty[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value.map((item, index) => {
+    const property = recordField(item);
+    return {
+      id: stringField(property.id) || `property-${index}`,
+      key: stringField(property.key),
+      value: stringField(property.value),
+    };
+  });
+}
+
+function recordField(value: unknown): Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value) ? value as Record<string, unknown> : {};
+}
+
+function positionField(value: unknown, fallback: { x: number; y: number }): { x: number; y: number } {
+  const position = recordField(value);
+  const x = Number(position.x);
+  const y = Number(position.y);
+  return {
+    x: Number.isFinite(x) ? x : fallback.x,
+    y: Number.isFinite(y) ? y : fallback.y,
+  };
+}
+
+function position3DField(
+  value: unknown,
+  fallback: Position3D = { x: 0, y: 0, z: 0 },
+): Position3D {
+  const position = recordField(value);
+  return {
+    x: finiteNumber(position.x, fallback.x),
+    y: finiteNumber(position.y, fallback.y),
+    z: finiteNumber(position.z, fallback.z),
+  };
+}
+
+function finiteNumber(value: unknown, fallback: number): number {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function uniqueValues(values: string[]): string[] {
+  return [...new Set(values.filter(Boolean))].sort((left, right) => left.localeCompare(right));
+}
+
+function toggleValue(values: string[], value: string): string[] {
+  return values.includes(value) ? values.filter((item) => item !== value) : [...values, value];
+}
+
+function edgeTypeStyle(edgeType: string): CSSProperties {
+  return EDGE_TYPE_STYLES[edgeType] || DEFAULT_EDGE_TYPE_STYLE;
+}
+
+function isAnimatedEdge(edgeType: string): boolean {
+  return ANIMATED_EDGE_TYPES.has(edgeType);
+}
+
+function withEdgePresentation(
+  edge: Edge<EditableEdgeData>,
+  data: EditableEdgeData,
+): Edge<EditableEdgeData> {
+  const style = edgeTypeStyle(data.edgeType);
+  return {
+    ...edge,
+    label: data.label,
+    animated: isAnimatedEdge(data.edgeType),
+    data,
+    style,
+    sourceHandle: sourceHandleForType(data.edgeType),
+    targetHandle: targetHandleForType(data.edgeType),
+    markerEnd: {
+      type: MarkerType.ArrowClosed,
+      color: String(style.stroke),
+      width: 22,
+      height: 22,
+    },
+  };
+}
+
+function arrangeNodes(
+  nodes: Node<NotationNodeData>[],
+  edges: Edge<EditableEdgeData>[],
+  mode: LayoutMode,
+): Node<NotationNodeData>[] {
+  const fixed = nodes.filter((node) => node.id.startsWith('__'));
+  const editable = nodes.filter((node) => !node.id.startsWith('__'));
+  const positions = arrangeGraphNodes(
+    editable.map((node) => ({
+      id: node.id,
+      createdAt: node.data.createdAt,
+      nodeType: node.data.nodeType,
+      position: node.position,
+    })),
+    edges.map((edge) => ({
+      source: edge.source,
+      target: edge.target,
+      type: edgeData(edge).edgeType,
+    })),
+    mode,
+  );
+  return [
+    ...fixed,
+    ...editable.map((node) => ({
+      ...node,
+      position: positions.get(node.id) || node.position,
+    })),
+  ];
+}
+
+function stringField(value: unknown): string {
+  return typeof value === 'string' ? value : '';
+}
+
+function numberField(value: unknown): number {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : 0;
+}
+
+function annotationKey(kind: 'node' | 'edge', id: string, notation: Notation): string {
+  return `${notation}:${kind}:${id}`;
+}
+
+function readImageFile(file: File): Promise<string> {
+  const supportedTypes = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gif']);
+  if (!supportedTypes.has(file.type)) {
+    return Promise.reject(new Error('Поддерживаются PNG, JPEG, WebP и GIF.'));
+  }
+  if (file.size > 700_000) {
+    return Promise.reject(new Error('Размер изображения не должен превышать 700 КБ.'));
+  }
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || ''));
+    reader.onerror = () => reject(new Error('Не удалось прочитать изображение.'));
+    reader.readAsDataURL(file);
+  });
 }

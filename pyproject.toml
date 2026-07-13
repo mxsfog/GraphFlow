@@ -5,6 +5,12 @@ description = "Python news search, OpenRouter ranking, and OrientDB persistence 
 requires-python = ">=3.11"
 dependencies = []
 
+[dependency-groups]
+dev = [
+    "pytest==9.0.2",
+    "ruff==0.15.5",
+]
+
 [project.scripts]
 electromotiv-news = "electromotiv_pipeline.cli:main"
 
@@ -13,7 +19,10 @@ line-length = 100
 target-version = "py311"
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "UP", "B", "SIM"]
+select = ["E", "F", "I", "UP", "B", "SIM", "C90"]
+
+[tool.ruff.lint.mccabe]
+max-complexity = 15
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]

@@ -27,6 +27,8 @@ def build_google_news_rss_url(query: str) -> str:
 
 def fetch_news(query: str, max_records: int, timeout_seconds: int = 30) -> list[Article]:
     articles: list[Article] = []
+    errors: list[str] = []
+    successful_sources = 0
     for source in build_news_sources(query):
         try:
             payload = get_url(
@@ -34,16 +36,19 @@ def fetch_news(query: str, max_records: int, timeout_seconds: int = 30) -> list[
                 headers={"User-Agent": "electromotiv-practice/0.1"},
                 timeout_seconds=timeout_seconds,
             )
-        except RuntimeError:
-            continue
-        articles.extend(
-            parse_google_news_rss(
+            parsed_articles = parse_google_news_rss(
                 payload,
                 max_records=max_records,
                 source_name=source.name,
                 source_url=source.url,
             )
-        )
+        except (RuntimeError, ET.ParseError) as exc:
+            errors.append(f"{source.name}: {exc}")
+            continue
+        successful_sources += 1
+        articles.extend(parsed_articles)
+    if successful_sources == 0:
+        raise RuntimeError("Не удалось получить RSS: " + "; ".join(errors))
     return deduplicate_articles(articles)
 
 

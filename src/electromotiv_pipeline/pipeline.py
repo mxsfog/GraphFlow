@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
 from pathlib import Path
 from uuid import uuid4
 
-from electromotiv_pipeline.config import PipelineConfig
+from electromotiv_pipeline.config import DEFAULT_SCHEMA_PATH, PipelineConfig
 from electromotiv_pipeline.google_news import build_news_sources, fetch_news
 from electromotiv_pipeline.google_sheets import GoogleSheetsClient
 from electromotiv_pipeline.models import RankedLink
@@ -19,7 +20,10 @@ def run_pipeline(
     ensure_schema: bool,
 ) -> list[RankedLink]:
     run_id = str(uuid4())
+    started_at = datetime.now(UTC).isoformat(timespec="seconds")
     articles = fetch_news(config.query, config.max_records)
+    if not articles:
+        raise RuntimeError("Ни один новостной источник не вернул кандидатов.")
     ranked_links = rank_articles_with_openrouter(
         api_key=config.openrouter_api_key,
         model=config.openrouter_model,
@@ -30,6 +34,7 @@ def run_pipeline(
 
     write_output(config.output_path, ranked_links)
 
+    client: OrientDBClient | None = None
     if save_to_orientdb:
         client = OrientDBClient(
             base_url=config.orientdb_url,
@@ -37,7 +42,7 @@ def run_pipeline(
             auth_header=config.orientdb_auth_header,
         )
         if ensure_schema:
-            client.ensure_schema(Path("orientdb/schema.sql"))
+            client.ensure_schema(DEFAULT_SCHEMA_PATH)
         client.save_ranked_links(
             query=config.query,
             run_id=run_id,
@@ -45,9 +50,19 @@ def run_pipeline(
             links=ranked_links,
             sources_count=len(build_news_sources(config.query)),
             candidates_count=len(articles),
+            started_at=started_at,
         )
 
-    save_ranked_links_to_google_sheets(config, ranked_links)
+    try:
+        sheets_saved_count = save_ranked_links_to_google_sheets(config, ranked_links)
+    except RuntimeError as exc:
+        if client is not None:
+            client.mark_google_sheets_result(run_id=run_id, saved_count=0, error=str(exc))
+        raise RuntimeError(
+            f"Результат сохранен локально, но экспорт в Google Sheets завершился ошибкой: {exc}"
+        ) from exc
+    if client is not None and config.google_sheets.enabled:
+        client.mark_google_sheets_result(run_id=run_id, saved_count=sheets_saved_count)
 
     return ranked_links
 

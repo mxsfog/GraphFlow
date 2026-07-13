@@ -19,4 +19,8 @@ echo "Docker:"
 
 echo
 echo "D-only runtime directories:"
-find .runtime -maxdepth 3 -type d | sort
+if [[ -d .runtime ]]; then
+  find .runtime -maxdepth 3 -type d | sort
+else
+  echo ".runtime еще не создан; выполните scripts/bootstrap_local.sh"
+fi
