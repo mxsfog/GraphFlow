@@ -734,7 +734,7 @@ export function GraphViewer({ apiBaseUrl }: GraphViewerProps) {
       source,
       target,
       label: edgeType,
-      type: 'smoothstep',
+      type: 'straight',
       data: {
         label: edgeType,
         edgeType,
@@ -1103,11 +1103,10 @@ function GraphFilters({
       ) : null}
       <section className="filter-section">
         <h3>Редактирование структуры</h3>
-        {!editableGraph ? (
-          <button type="button" onClick={onCreateCopy}>
-            Создать редактируемую копию
-          </button>
-        ) : (
+        <button type="button" onClick={onCreateCopy}>
+          Создать редактируемую копию
+        </button>
+        {editableGraph ? (
           <div className="structure-editor">
             <input value={nodeLabel} onChange={(event) => setNodeLabel(event.target.value)} />
             <select value={nodeType} onChange={(event) => setNodeType(event.target.value)}>
@@ -1137,7 +1136,7 @@ function GraphFilters({
               Добавить ребро
             </button>
           </div>
-        )}
+        ) : null}
       </section>
     </aside>
   );
@@ -1608,7 +1607,7 @@ function toReactFlow(payload: GraphPayload | null): {
         source: edge.source,
         target: edge.target,
         label: edge.label,
-        type: 'smoothstep',
+        type: 'straight',
         animated: isAnimatedEdge(edge.type),
         data: {
           label: edge.label,

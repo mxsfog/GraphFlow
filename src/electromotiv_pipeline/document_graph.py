@@ -9,6 +9,11 @@ from electromotiv_pipeline.openrouter import (
     strip_markdown_code_fence,
 )
 
+HORIZONTAL_GAP = 360
+VERTICAL_GAP = 180
+ORIGIN_X = -600
+ORIGIN_Y = -260
+
 
 def decompose_document_with_openrouter(
     *,
@@ -81,4 +86,42 @@ def parse_document_graph(
     edges = [normalize_custom_edge(item, node_ids=node_ids) for item in raw_edges]
     if len({str(edge["id"]) for edge in edges}) != len(edges):
         raise RuntimeError("LLM вернула повторяющиеся идентификаторы ребер.")
-    return nodes, edges, content
+    return arrange_document_nodes(nodes, edges), edges, content
+
+
+def arrange_document_nodes(
+    nodes: list[dict[str, object]],
+    edges: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    node_ids = [str(node["id"]) for node in nodes]
+    adjacency = {node_id: set() for node_id in node_ids}
+    indegree = {node_id: 0 for node_id in node_ids}
+    levels = {node_id: 0 for node_id in node_ids}
+    for edge in edges:
+        source = str(edge["source"])
+        target = str(edge["target"])
+        if target in adjacency[source] or source == target:
+            continue
+        adjacency[source].add(target)
+        indegree[target] += 1
+
+    queue = [node_id for node_id in node_ids if indegree[node_id] == 0]
+    for source in queue:
+        for target in adjacency[source]:
+            levels[target] = max(levels[target], levels[source] + 1)
+            indegree[target] -= 1
+            if indegree[target] == 0:
+                queue.append(target)
+
+    groups: dict[int, list[str]] = {}
+    for node_id in node_ids:
+        groups.setdefault(levels[node_id], []).append(node_id)
+    positions = {
+        node_id: {
+            "x": ORIGIN_X + level * HORIZONTAL_GAP,
+            "y": ORIGIN_Y + row * VERTICAL_GAP,
+        }
+        for level, group in sorted(groups.items())
+        for row, node_id in enumerate(group)
+    }
+    return [{**node, **positions[str(node["id"])]} for node in nodes]

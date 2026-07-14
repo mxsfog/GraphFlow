@@ -357,5 +357,7 @@ def test_parse_document_graph_accepts_markdown_fence() -> None:
     nodes, edges, raw_content = parse_document_graph(content)
 
     assert [node["id"] for node in nodes] == ["section-1", "task-1"]
+    assert (nodes[0]["x"], nodes[0]["y"]) != (nodes[1]["x"], nodes[1]["y"])
+    assert int(nodes[0]["x"]) < int(nodes[1]["x"])
     assert edges[0]["type"] == "include"
     assert raw_content == content
