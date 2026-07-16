@@ -119,3 +119,27 @@ CREATE PROPERTY GraphConnection.properties_json STRING;
 CREATE PROPERTY GraphConnection.created_at DATETIME;
 CREATE PROPERTY GraphConnection.updated_at DATETIME;
 CREATE INDEX GraphConnection.key ON GraphConnection (graph_id, edge_id) UNIQUE;
+
+CREATE CLASS GraphGroup EXTENDS V;
+CREATE PROPERTY GraphGroup.graph_id STRING;
+CREATE PROPERTY GraphGroup.notation STRING;
+CREATE PROPERTY GraphGroup.group_id STRING;
+CREATE PROPERTY GraphGroup.title STRING;
+CREATE PROPERTY GraphGroup.node_ids_json STRING;
+CREATE PROPERTY GraphGroup.child_group_ids_json STRING;
+CREATE PROPERTY GraphGroup.collapsed BOOLEAN;
+CREATE PROPERTY GraphGroup.revision INTEGER;
+CREATE PROPERTY GraphGroup.created_at DATETIME;
+CREATE PROPERTY GraphGroup.updated_at DATETIME;
+CREATE INDEX GraphGroup.key ON GraphGroup (graph_id, notation, group_id) UNIQUE;
+
+CREATE CLASS GraphTemplate EXTENDS V;
+CREATE PROPERTY GraphTemplate.template_id STRING;
+CREATE PROPERTY GraphTemplate.name STRING;
+CREATE PROPERTY GraphTemplate.description STRING;
+CREATE PROPERTY GraphTemplate.notation STRING;
+CREATE PROPERTY GraphTemplate.definition_json STRING;
+CREATE PROPERTY GraphTemplate.revision INTEGER;
+CREATE PROPERTY GraphTemplate.created_at DATETIME;
+CREATE PROPERTY GraphTemplate.updated_at DATETIME;
+CREATE INDEX GraphTemplate.template_id UNIQUE;

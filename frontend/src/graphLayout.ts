@@ -1,4 +1,4 @@
-export type LayoutMode = 'follow' | 'timeline' | 'structure';
+export type LayoutMode = 'overview' | 'follow' | 'timeline' | 'structure';
 
 export type LayoutNode = {
   id: string;
@@ -23,7 +23,7 @@ export function arrangeGraphNodes(
     : layeredLayout(
         nodes,
         mode === 'follow' ? edges.filter((edge) => edge.type === 'follow') : edges,
-        mode === 'follow' ? 'horizontal' : 'vertical',
+        mode === 'structure' ? 'vertical' : 'horizontal',
       );
   return new Map(positioned.map((node) => [node.id, node.position]));
 }
@@ -40,7 +40,10 @@ function timelineLayout(nodes: LayoutNode[]): LayoutNode[] {
   return [...groups.values()].flatMap((group, groupIndex) =>
     group.map((node, rowIndex) => ({
       ...node,
-      position: { x: -620 + groupIndex * 320, y: -180 + rowIndex * 180 },
+      position: {
+        x: groupIndex * 380,
+        y: (rowIndex - (group.length - 1) / 2) * 180,
+      },
     })),
   );
 }
@@ -58,8 +61,8 @@ function layeredLayout(
     return [...nodes].sort(compareByStructure).map((node, index) => ({
       ...node,
       position: direction === 'horizontal'
-        ? { x: -620 + index * 300, y: -100 }
-        : { x: -300 + (index % 4) * 300, y: -180 + Math.floor(index / 4) * 190 },
+        ? { x: index * 360, y: 0 }
+        : { x: (index % 4) * 300, y: Math.floor(index / 4) * 210 },
     }));
   }
   const components = stronglyConnectedComponents([...nodeIds], graphEdges);
@@ -72,7 +75,12 @@ function layeredLayout(
   graphEdges.forEach((edge) => {
     const source = componentByNode.get(edge.source);
     const target = componentByNode.get(edge.target);
-    if (source === undefined || target === undefined || source === target || adjacency[source].has(target)) {
+    if (
+      source === undefined
+      || target === undefined
+      || source === target
+      || adjacency[source].has(target)
+    ) {
       return;
     }
     adjacency[source].add(target);
@@ -91,35 +99,94 @@ function layeredLayout(
     });
   }
   const byId = new Map(nodes.map((node) => [node.id, node]));
-  const componentsByLevel = new Map<number, number[]>();
-  levels.forEach((level, index) => {
-    componentsByLevel.set(level, [...(componentsByLevel.get(level) || []), index]);
-  });
+  const componentsByLevel = orderedComponentsByLevel(components, adjacency, levels);
+  const maxLevel = Math.max(...levels);
   const positioned: LayoutNode[] = [];
   [...componentsByLevel.entries()].forEach(([level, componentIndexes]) => {
-    componentIndexes.forEach((componentIndex, groupIndex) => {
-      const component = components[componentIndex];
-      const center = direction === 'horizontal'
-        ? { x: -620 + level * 340, y: -180 + groupIndex * 240 }
-        : { x: -620 + groupIndex * 320, y: -180 + level * 220 };
-      component.forEach((nodeId, cycleIndex) => {
-        const node = byId.get(nodeId);
-        if (!node) {
-          return;
-        }
-        const angle = component.length > 1 ? (2 * Math.PI * cycleIndex) / component.length : 0;
-        const radius = component.length > 1 ? 90 : 0;
-        positioned.push({
-          ...node,
-          position: {
-            x: Math.round(center.x + Math.cos(angle) * radius),
-            y: Math.round(center.y + Math.sin(angle) * radius),
-          },
-        });
+    const nodeIds = componentIndexes.flatMap((componentIndex) =>
+      [...components[componentIndex]].sort(),
+    );
+    nodeIds.forEach((nodeId, index) => {
+      const node = byId.get(nodeId);
+      if (!node) {
+        return;
+      }
+      const crossAxis = (index - (nodeIds.length - 1) / 2) * 160;
+      const mainAxis = (level - maxLevel / 2) * (direction === 'horizontal' ? 320 : 210);
+      positioned.push({
+        ...node,
+        position: {
+          x: Math.round(direction === 'horizontal' ? mainAxis : crossAxis * 1.45),
+          y: Math.round(direction === 'horizontal' ? crossAxis : mainAxis),
+        },
       });
     });
   });
   return positioned;
+}
+
+function orderedComponentsByLevel(
+  components: string[][],
+  adjacency: Set<number>[],
+  levels: number[],
+): Map<number, number[]> {
+  const byLevel = new Map<number, number[]>();
+  levels.forEach((level, index) => {
+    byLevel.set(level, [...(byLevel.get(level) || []), index]);
+  });
+  for (const indexes of byLevel.values()) {
+    indexes.sort((left, right) =>
+      componentKey(components[left]).localeCompare(componentKey(components[right])),
+    );
+  }
+  const predecessors = components.map(() => new Set<number>());
+  adjacency.forEach((targets, source) =>
+    targets.forEach((target) => predecessors[target].add(source)),
+  );
+  const maxLevel = Math.max(...levels);
+  for (let pass = 0; pass < 4; pass += 1) {
+    for (let level = 1; level <= maxLevel; level += 1) {
+      sortByNeighbors(byLevel, level, predecessors);
+    }
+    for (let level = maxLevel - 1; level >= 0; level -= 1) {
+      sortByNeighbors(byLevel, level, adjacency);
+    }
+  }
+  return byLevel;
+}
+
+function sortByNeighbors(
+  levels: Map<number, number[]>,
+  level: number,
+  neighbors: Set<number>[],
+): void {
+  const current = levels.get(level);
+  if (!current || current.length < 2) {
+    return;
+  }
+  const positions = new Map<number, number>();
+  for (const indexes of levels.values()) {
+    indexes.forEach((component, index) => positions.set(component, index));
+  }
+  current.sort(
+    (left, right) =>
+      barycenter(left, neighbors, positions) - barycenter(right, neighbors, positions),
+  );
+}
+
+function barycenter(
+  component: number,
+  neighbors: Set<number>[],
+  positions: Map<number, number>,
+): number {
+  const values = [...neighbors[component]].map((neighbor) => positions.get(neighbor) || 0);
+  return values.length > 0
+    ? values.reduce((total, value) => total + value, 0) / values.length
+    : positions.get(component) || 0;
+}
+
+function componentKey(component: string[]): string {
+  return [...component].sort().join('\u0000');
 }
 
 function compareByCreatedAt(left: LayoutNode, right: LayoutNode): number {

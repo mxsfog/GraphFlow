@@ -233,6 +233,8 @@ def command_check_orientdb(args: argparse.Namespace) -> None:
                 "GraphNode",
                 "GraphConnection",
                 "GraphAnnotation",
+                "GraphGroup",
+                "GraphTemplate",
             )
         }
     )

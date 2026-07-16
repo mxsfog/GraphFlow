@@ -99,8 +99,13 @@ NODE_STYLE_PALETTE = {
 DEFAULT_NODE_STYLE = {"background": "#ffffff", "borderColor": "#334155"}
 DEFAULT_RUN_LIMIT = 6
 MAX_REQUEST_BYTES = 2_000_000
+MAX_GRAPH_GROUPS = 100
+MAX_GROUP_NODES = 200
+MAX_GROUP_CHILDREN = 50
+MAX_GRAPH_TEMPLATES = 50
 LOGGER = logging.getLogger(__name__)
 ANNOTATION_LOCK = threading.RLock()
+WORKSPACE_LOCK = threading.RLock()
 
 
 class ConflictError(RuntimeError):
@@ -177,6 +182,14 @@ class GraphRequestHandler(BaseHTTPRequestHandler):
         except (ValueError, ConflictError, RuntimeError) as exc:
             self.write_api_error(exc)
 
+    def do_DELETE(self) -> None:
+        if not self.require_authorization():
+            return
+        try:
+            self.write_route_response(route_delete(self.client, self.path))
+        except (ValueError, ConflictError, RuntimeError) as exc:
+            self.write_api_error(exc)
+
     def require_authorization(self) -> bool:
         if is_authorized(self.headers.get("Authorization"), self.auth):
             return True
@@ -234,7 +247,7 @@ class GraphRequestHandler(BaseHTTPRequestHandler):
         if origin:
             self.send_header("Access-Control-Allow-Origin", origin)
             self.send_header("Vary", "Origin")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Authorization, Content-Type")
         self.send_header("Access-Control-Max-Age", "600")
 
@@ -270,6 +283,14 @@ def route_get(client: OrientDBClient, raw_path: str) -> dict[str, object] | None
         return graph_api_schema()
     if parsed.path == "/api/search-runs":
         return {"runs": list_search_runs(client)}
+    if parsed.path == "/api/graph/groups":
+        graph_id = first_query_value(query, "graph_id", "")
+        return {"groups": list_graph_groups(client, graph_id=graph_id, notation=notation)}
+    if parsed.path == "/api/graph/templates":
+        return {"templates": list_graph_templates(client)}
+    if parsed.path.startswith("/api/graph/templates/"):
+        template_id = urllib.parse.unquote(parsed.path.removeprefix("/api/graph/templates/"))
+        return get_graph_template(client, template_id=template_id)
     if parsed.path == "/api/graph/latest-run":
         return latest_run_graph_payload(client=client, notation=notation, limit=limit)
     if parsed.path.startswith("/api/graph/run/"):
@@ -298,6 +319,27 @@ def route_post(
         return save_graph_annotations_batch(client, payload)
     if parsed.path == "/api/graphs":
         return save_custom_graph(client, payload)
+    if parsed.path == "/api/graph/groups":
+        return save_graph_group(client, payload)
+    if parsed.path == "/api/graph/templates":
+        return save_graph_template(client, payload)
+    return None
+
+
+def route_delete(client: OrientDBClient, raw_path: str) -> dict[str, object] | None:
+    parsed = urllib.parse.urlsplit(raw_path)
+    query = urllib.parse.parse_qs(parsed.query)
+    if parsed.path.startswith("/api/graph/groups/"):
+        group_id = urllib.parse.unquote(parsed.path.removeprefix("/api/graph/groups/"))
+        return delete_graph_group(
+            client,
+            graph_id=first_query_value(query, "graph_id", ""),
+            notation=first_query_value(query, "notation", "flow"),
+            group_id=group_id,
+        )
+    if parsed.path.startswith("/api/graph/templates/"):
+        template_id = urllib.parse.unquote(parsed.path.removeprefix("/api/graph/templates/"))
+        return delete_graph_template(client, template_id=template_id)
     return None
 
 
@@ -454,15 +496,17 @@ def runtime_nodes(
     run_id = str(run_row.get("run_id") or "")
     query = str(run_row.get("query") or "")
     model = str(run_row.get("model") or "")
-    topic_y = len(links) * 132 + 80
+    link_spacing = 170
+    center_y = max(0, (len(links) - 1) * link_spacing // 2)
+    topic_y = max(760, len(links) * link_spacing + 80)
     nodes = [
         runtime_node(
             node_id="actor:user",
             label="Пользователь",
             node_type="actor",
             stored_shape="actor",
-            x=-660,
-            y=260,
+            x=-980,
+            y=center_y,
             notation=notation,
             data={"role": "user"},
         ),
@@ -471,8 +515,8 @@ def runtime_nodes(
             label=f"Запуск поиска\n{short_text(query, 46)}",
             node_type="process",
             stored_shape="rounded_rectangle",
-            x=-380,
-            y=250,
+            x=-650,
+            y=center_y,
             notation=notation,
             data={
                 "class": "SearchRun",
@@ -490,8 +534,8 @@ def runtime_nodes(
             label="Google News RSS",
             node_type="component",
             stored_shape="component",
-            x=-70,
-            y=20,
+            x=-260,
+            y=max(0, center_y - 260),
             notation=notation,
             data={"class": "GoogleNewsSource"},
         ),
@@ -500,8 +544,8 @@ def runtime_nodes(
             label=short_text(model or "LLM", 36),
             node_type="model",
             stored_shape="component",
-            x=-70,
-            y=500,
+            x=-260,
+            y=center_y,
             notation=notation,
             data={"class": "ModelRun", "model": model},
         ),
@@ -510,8 +554,8 @@ def runtime_nodes(
             label="OrientDB",
             node_type="storage",
             stored_shape="database",
-            x=-380,
-            y=520,
+            x=-260,
+            y=center_y + 260,
             notation=notation,
             data={"class": "OrientDB", "database": "news"},
         ),
@@ -523,8 +567,8 @@ def runtime_nodes(
                 label="Google Sheets",
                 node_type="storage",
                 stored_shape="document",
-                x=-380,
-                y=660,
+                x=-260,
+                y=center_y + 430,
                 notation=notation,
                 data={
                     "class": "GoogleSheetsExport",
@@ -540,7 +584,7 @@ def runtime_nodes(
             label=f"Тема\n{short_text(query, 42)}",
             node_type="topic",
             stored_shape="rounded_rectangle",
-            x=530,
+            x=-260,
             y=topic_y,
             notation=notation,
             data={"class": "Topic", "name": query},
@@ -552,7 +596,7 @@ def runtime_nodes(
 def news_link_nodes(*, links: list[dict[str, object]], notation: str) -> list[ApiNode]:
     nodes: list[ApiNode] = []
     for index, link in enumerate(links):
-        y = index * 118
+        y = index * 170
         score = float_or_default(link.get("llm_score"), 0.0)
         nodes.append(
             runtime_node(
@@ -560,7 +604,7 @@ def news_link_nodes(*, links: list[dict[str, object]], notation: str) -> list[Ap
                 label=f"{index + 1}. {short_text(str(link.get('title') or ''), 62)}",
                 node_type="news",
                 stored_shape="document",
-                x=330,
+                x=220,
                 y=y,
                 notation=notation,
                 data={
@@ -595,8 +639,8 @@ def source_nodes(*, links: list[dict[str, object]], notation: str) -> list[ApiNo
                 label=short_text(source_name(link), 34),
                 node_type="source",
                 stored_shape="rounded_rectangle",
-                x=820,
-                y=index * 132,
+                x=690,
+                y=index * 170,
                 notation=notation,
                 data={
                     "class": "Source",
@@ -653,7 +697,7 @@ def runtime_edges(
             [
                 runtime_edge(
                     f"e_found_{stable_id}",
-                    "run",
+                    "component:rss",
                     news_id,
                     "found",
                     "найдено",
@@ -892,6 +936,252 @@ def save_custom_graph(
     }
 
 
+def list_graph_groups(
+    client: OrientDBClient,
+    *,
+    graph_id: str,
+    notation: str,
+) -> list[dict[str, object]]:
+    validate_graph_scope(graph_id, notation)
+    rows = orient_rows(
+        client,
+        "SELECT FROM GraphGroup "
+        f"WHERE graph_id = '{sql_string(graph_id)}' "
+        f"AND notation = '{sql_string(notation)}' ORDER BY created_at ASC",
+    )
+    return [graph_group_from_row(row) for row in rows]
+
+
+def save_graph_group(
+    client: OrientDBClient,
+    request_payload: dict[str, object],
+) -> dict[str, object]:
+    graph_id = required_string(request_payload, "graph_id")
+    notation = required_string(request_payload, "notation")
+    group_id = required_string(request_payload, "group_id")
+    title = required_string(request_payload, "title")
+    revision = int_or_default(request_payload.get("revision"), -1)
+    collapsed = request_payload.get("collapsed", False)
+    validate_graph_scope(graph_id, notation)
+    validate_identifier(group_id, "group_id")
+    if len(title) > 200:
+        raise ValueError("title группы превышает 200 символов.")
+    if revision < 0:
+        raise ValueError("revision должен быть неотрицательным целым числом.")
+    if not isinstance(collapsed, bool):
+        raise ValueError("collapsed должен быть логическим значением.")
+    node_ids = normalize_identifier_list(
+        request_payload.get("node_ids", []),
+        field_name="node_ids",
+        limit=MAX_GROUP_NODES,
+    )
+    child_group_ids = normalize_identifier_list(
+        request_payload.get("child_group_ids", []),
+        field_name="child_group_ids",
+        limit=MAX_GROUP_CHILDREN,
+    )
+    if not node_ids and not child_group_ids:
+        raise ValueError("Группа должна содержать узел или дочернюю группу.")
+
+    with WORKSPACE_LOCK:
+        rows = orient_rows(
+            client,
+            "SELECT FROM GraphGroup "
+            f"WHERE graph_id = '{sql_string(graph_id)}' "
+            f"AND notation = '{sql_string(notation)}' "
+            f"AND group_id = '{sql_string(group_id)}' LIMIT 1",
+        )
+        current_revision = int_or_default(rows[0].get("revision"), 0) if rows else 0
+        if revision != current_revision:
+            raise ConflictError(
+                f"Конфликт версии группы {group_id}: ожидалась {revision}, "
+                f"текущая {current_revision}."
+            )
+        candidate = {
+            "graph_id": graph_id,
+            "notation": notation,
+            "group_id": group_id,
+            "title": title,
+            "node_ids": node_ids,
+            "child_group_ids": child_group_ids,
+            "collapsed": collapsed,
+            "revision": current_revision + 1,
+        }
+        groups = [
+            group
+            for group in list_graph_groups(client, graph_id=graph_id, notation=notation)
+            if group["group_id"] != group_id
+        ]
+        groups.append(candidate)
+        if len(groups) > MAX_GRAPH_GROUPS:
+            raise ValueError(f"Граф может содержать не более {MAX_GRAPH_GROUPS} групп.")
+        validate_group_hierarchy(groups, valid_node_ids=graph_node_ids(client, graph_id, notation))
+
+        stored_payload = {
+            "graph_id": graph_id,
+            "notation": notation,
+            "group_id": group_id,
+            "title": title,
+            "node_ids_json": compact_json(node_ids),
+            "child_group_ids_json": compact_json(child_group_ids),
+            "collapsed": collapsed,
+            "revision": current_revision + 1,
+            "updated_at": now_orient(),
+        }
+        if rows and rows[0].get("@rid"):
+            client.command(
+                f"UPDATE {rows[0]['@rid']} MERGE "
+                f"{json.dumps(stored_payload, ensure_ascii=False)} RETURN AFTER"
+            )
+        else:
+            client.create_vertex("GraphGroup", {**stored_payload, "created_at": now_orient()})
+    saved_group = next(
+        group
+        for group in list_graph_groups(client, graph_id=graph_id, notation=notation)
+        if group["group_id"] == group_id
+    )
+    return {"saved": True, **saved_group}
+
+
+def delete_graph_group(
+    client: OrientDBClient,
+    *,
+    graph_id: str,
+    notation: str,
+    group_id: str,
+) -> dict[str, object]:
+    validate_graph_scope(graph_id, notation)
+    validate_identifier(group_id, "group_id")
+    with WORKSPACE_LOCK:
+        rows = orient_rows(
+            client,
+            "SELECT FROM GraphGroup "
+            f"WHERE graph_id = '{sql_string(graph_id)}' "
+            f"AND notation = '{sql_string(notation)}' "
+            f"AND group_id = '{sql_string(group_id)}' LIMIT 1",
+        )
+        if not rows:
+            return {"deleted": False, "group_id": group_id}
+        groups = list_graph_groups(client, graph_id=graph_id, notation=notation)
+        for parent in groups:
+            child_ids = [item for item in parent["child_group_ids"] if item != group_id]
+            if child_ids == parent["child_group_ids"]:
+                continue
+            if not child_ids and not parent["node_ids"]:
+                raise ValueError(f"Сначала удалите родительскую группу {parent['group_id']}.")
+            parent_rows = orient_rows(
+                client,
+                "SELECT @rid AS rid FROM GraphGroup "
+                f"WHERE graph_id = '{sql_string(graph_id)}' "
+                f"AND notation = '{sql_string(notation)}' "
+                f"AND group_id = '{sql_string(str(parent['group_id']))}' LIMIT 1",
+            )
+            if parent_rows and parent_rows[0].get("rid"):
+                update = {
+                    "child_group_ids_json": compact_json(child_ids),
+                    "revision": int_or_default(parent.get("revision"), 0) + 1,
+                    "updated_at": now_orient(),
+                }
+                client.command(
+                    f"UPDATE {parent_rows[0]['rid']} MERGE {json.dumps(update, ensure_ascii=False)}"
+                )
+        client.command(f"DELETE VERTEX {rows[0]['@rid']}")
+    return {"deleted": True, "group_id": group_id}
+
+
+def list_graph_templates(client: OrientDBClient) -> list[dict[str, object]]:
+    rows = orient_rows(
+        client,
+        "SELECT template_id, name, description, notation, revision, created_at, updated_at "
+        f"FROM GraphTemplate ORDER BY updated_at DESC LIMIT {MAX_GRAPH_TEMPLATES}",
+    )
+    return [graph_template_from_row(row, include_definition=False) for row in rows]
+
+
+def get_graph_template(
+    client: OrientDBClient,
+    *,
+    template_id: str,
+) -> dict[str, object]:
+    validate_identifier(template_id, "template_id")
+    rows = orient_rows(
+        client,
+        f"SELECT FROM GraphTemplate WHERE template_id = '{sql_string(template_id)}' LIMIT 1",
+    )
+    if not rows:
+        raise ValueError("Шаблон не найден.")
+    return graph_template_from_row(rows[0], include_definition=True)
+
+
+def save_graph_template(
+    client: OrientDBClient,
+    request_payload: dict[str, object],
+) -> dict[str, object]:
+    template_id = required_string(request_payload, "template_id")
+    name = required_string(request_payload, "name")
+    description = str(request_payload.get("description") or "").strip()
+    notation = required_string(request_payload, "notation")
+    revision = int_or_default(request_payload.get("revision"), -1)
+    validate_identifier(template_id, "template_id")
+    if notation not in SUPPORTED_NOTATIONS:
+        raise ValueError(f"Неподдерживаемая нотация: {notation}")
+    if len(name) > 200 or len(description) > 2000:
+        raise ValueError("Название или описание шаблона превышает допустимую длину.")
+    if revision < 0:
+        raise ValueError("revision должен быть неотрицательным целым числом.")
+    definition = normalize_template_definition(request_payload.get("definition"))
+
+    with WORKSPACE_LOCK:
+        rows = orient_rows(
+            client,
+            f"SELECT FROM GraphTemplate WHERE template_id = '{sql_string(template_id)}' LIMIT 1",
+        )
+        current_revision = int_or_default(rows[0].get("revision"), 0) if rows else 0
+        if revision != current_revision:
+            raise ConflictError(
+                f"Конфликт версии шаблона {template_id}: ожидалась {revision}, "
+                f"текущая {current_revision}."
+            )
+        if not rows and len(list_graph_templates(client)) >= MAX_GRAPH_TEMPLATES:
+            raise ValueError(f"Разрешено хранить не более {MAX_GRAPH_TEMPLATES} шаблонов.")
+        next_revision = current_revision + 1
+        stored_payload = {
+            "template_id": template_id,
+            "name": name,
+            "description": description,
+            "notation": notation,
+            "definition_json": compact_json(definition),
+            "revision": next_revision,
+            "updated_at": now_orient(),
+        }
+        if rows and rows[0].get("@rid"):
+            client.command(
+                f"UPDATE {rows[0]['@rid']} MERGE "
+                f"{json.dumps(stored_payload, ensure_ascii=False)} RETURN AFTER"
+            )
+        else:
+            client.create_vertex("GraphTemplate", {**stored_payload, "created_at": now_orient()})
+    return {"saved": True, **get_graph_template(client, template_id=template_id)}
+
+
+def delete_graph_template(
+    client: OrientDBClient,
+    *,
+    template_id: str,
+) -> dict[str, object]:
+    validate_identifier(template_id, "template_id")
+    with WORKSPACE_LOCK:
+        rows = orient_rows(
+            client,
+            "SELECT @rid AS rid FROM GraphTemplate "
+            f"WHERE template_id = '{sql_string(template_id)}' LIMIT 1",
+        )
+        if not rows:
+            return {"deleted": False, "template_id": template_id}
+        client.command(f"DELETE VERTEX {rows[0]['rid']}")
+    return {"deleted": True, "template_id": template_id}
+
+
 def custom_graph_payload(
     *,
     client: OrientDBClient,
@@ -989,6 +1279,201 @@ def normalize_custom_edge(value: object, *, node_ids: set[str]) -> dict[str, obj
         "label": str(value.get("label") or "")[:1000],
         "properties": list_value(value.get("properties"))[:50],
     }
+
+
+def normalize_template_definition(value: object) -> dict[str, object]:
+    if not isinstance(value, dict):
+        raise ValueError("definition должен быть JSON-объектом.")
+    raw_nodes = value.get("nodes")
+    raw_edges = value.get("edges", [])
+    raw_groups = value.get("groups", [])
+    if not isinstance(raw_nodes, list) or not 1 <= len(raw_nodes) <= 200:
+        raise ValueError("Шаблон должен содержать от 1 до 200 узлов.")
+    if not isinstance(raw_edges, list) or len(raw_edges) > 500:
+        raise ValueError("Шаблон может содержать не более 500 ребер.")
+    if not isinstance(raw_groups, list) or len(raw_groups) > MAX_GRAPH_GROUPS:
+        raise ValueError(f"Шаблон может содержать не более {MAX_GRAPH_GROUPS} групп.")
+
+    nodes = [normalize_custom_node(item) for item in raw_nodes]
+    node_ids = {str(node["id"]) for node in nodes}
+    if len(node_ids) != len(nodes):
+        raise ValueError("Идентификаторы узлов шаблона должны быть уникальными.")
+    for node in nodes:
+        validate_properties(node["properties"])
+    edges = [normalize_custom_edge(item, node_ids=node_ids) for item in raw_edges]
+    if len({str(edge["id"]) for edge in edges}) != len(edges):
+        raise ValueError("Идентификаторы ребер шаблона должны быть уникальными.")
+    for edge in edges:
+        validate_properties(edge["properties"])
+
+    groups = [normalize_template_group(item) for item in raw_groups]
+    if len({str(group["group_id"]) for group in groups}) != len(groups):
+        raise ValueError("Идентификаторы групп шаблона должны быть уникальными.")
+    validate_group_hierarchy(groups, valid_node_ids=node_ids)
+    return {"nodes": nodes, "edges": edges, "groups": groups}
+
+
+def normalize_template_group(value: object) -> dict[str, object]:
+    if not isinstance(value, dict):
+        raise ValueError("Каждая группа шаблона должна быть JSON-объектом.")
+    group_id = required_string(value, "group_id")
+    title = required_string(value, "title")
+    collapsed = value.get("collapsed", False)
+    validate_identifier(group_id, "group_id")
+    if len(title) > 200:
+        raise ValueError("title группы превышает 200 символов.")
+    if not isinstance(collapsed, bool):
+        raise ValueError("collapsed должен быть логическим значением.")
+    node_ids = normalize_identifier_list(
+        value.get("node_ids", []),
+        field_name="node_ids",
+        limit=MAX_GROUP_NODES,
+    )
+    child_group_ids = normalize_identifier_list(
+        value.get("child_group_ids", []),
+        field_name="child_group_ids",
+        limit=MAX_GROUP_CHILDREN,
+    )
+    if not node_ids and not child_group_ids:
+        raise ValueError("Группа шаблона не может быть пустой.")
+    return {
+        "group_id": group_id,
+        "title": title,
+        "node_ids": node_ids,
+        "child_group_ids": child_group_ids,
+        "collapsed": collapsed,
+    }
+
+
+def validate_group_hierarchy(
+    groups: list[dict[str, object]],
+    *,
+    valid_node_ids: set[str],
+) -> None:
+    groups_by_id = {str(group["group_id"]): group for group in groups}
+    node_owners: dict[str, str] = {}
+    group_parents: dict[str, str] = {}
+    for group_id, group in groups_by_id.items():
+        node_ids = [str(item) for item in list_value(group.get("node_ids"))]
+        child_ids = [str(item) for item in list_value(group.get("child_group_ids"))]
+        missing_nodes = sorted(set(node_ids) - valid_node_ids)
+        if missing_nodes:
+            raise ValueError(
+                f"Группа {group_id} ссылается на отсутствующий узел {missing_nodes[0]}."
+            )
+        for node_id in node_ids:
+            owner = node_owners.setdefault(node_id, group_id)
+            if owner != group_id:
+                raise ValueError(f"Узел {node_id} уже входит в группу {owner}.")
+        for child_id in child_ids:
+            if child_id == group_id:
+                raise ValueError(f"Группа {group_id} не может содержать саму себя.")
+            if child_id not in groups_by_id:
+                raise ValueError(f"Дочерняя группа {child_id} не существует.")
+            parent = group_parents.setdefault(child_id, group_id)
+            if parent != group_id:
+                raise ValueError(f"Группа {child_id} уже входит в группу {parent}.")
+
+    state: dict[str, int] = {}
+
+    def visit(group_id: str) -> None:
+        if state.get(group_id) == 1:
+            raise ValueError("Иерархия групп содержит цикл.")
+        if state.get(group_id) == 2:
+            return
+        state[group_id] = 1
+        for child_id in list_value(groups_by_id[group_id].get("child_group_ids")):
+            visit(str(child_id))
+        state[group_id] = 2
+
+    for group_id in groups_by_id:
+        visit(group_id)
+
+
+def normalize_identifier_list(value: object, *, field_name: str, limit: int) -> list[str]:
+    if not isinstance(value, list) or len(value) > limit:
+        raise ValueError(f"{field_name} должен быть массивом не более чем из {limit} элементов.")
+    result: list[str] = []
+    for item in value:
+        if not isinstance(item, str) or not item.strip():
+            raise ValueError(f"Каждый элемент {field_name} должен быть непустой строкой.")
+        identifier = item.strip()
+        validate_identifier(identifier, field_name)
+        if identifier in result:
+            raise ValueError(f"{field_name} содержит повторяющийся идентификатор.")
+        result.append(identifier)
+    return result
+
+
+def validate_graph_scope(graph_id: str, notation: str) -> None:
+    if not graph_id:
+        raise ValueError("Поле graph_id обязательно.")
+    validate_identifier(graph_id, "graph_id")
+    if not graph_id.startswith(("run:", "graph:")):
+        raise ValueError("graph_id должен начинаться с run: или graph:.")
+    if notation not in SUPPORTED_NOTATIONS:
+        raise ValueError(f"Неподдерживаемая нотация: {notation}")
+
+
+def graph_node_ids(client: OrientDBClient, graph_id: str, notation: str) -> set[str]:
+    if graph_id.startswith("run:"):
+        payload = run_graph_payload(
+            client=client,
+            run_id=graph_id.removeprefix("run:"),
+            notation=notation,
+            limit=12,
+        )
+    elif graph_id.startswith("graph:"):
+        payload = custom_graph_payload(
+            client=client,
+            graph_id=graph_id.removeprefix("graph:"),
+            notation=notation,
+        )
+    else:
+        return set()
+    return {
+        str(item["id"])
+        for item in list_value(payload.get("nodes"))
+        if isinstance(item, dict) and item.get("id") and not str(item["id"]).startswith("__")
+    }
+
+
+def graph_group_from_row(row: dict[str, object]) -> dict[str, object]:
+    return {
+        "graph_id": str(row.get("graph_id") or ""),
+        "notation": str(row.get("notation") or "flow"),
+        "group_id": str(row.get("group_id") or ""),
+        "title": str(row.get("title") or "Группа"),
+        "node_ids": [str(item) for item in json_list(row.get("node_ids_json"))],
+        "child_group_ids": [str(item) for item in json_list(row.get("child_group_ids_json"))],
+        "collapsed": bool(row.get("collapsed", False)),
+        "revision": int_or_default(row.get("revision"), 0),
+        "created_at": str(row.get("created_at") or ""),
+        "updated_at": str(row.get("updated_at") or ""),
+    }
+
+
+def graph_template_from_row(
+    row: dict[str, object],
+    *,
+    include_definition: bool,
+) -> dict[str, object]:
+    result = {
+        "template_id": str(row.get("template_id") or ""),
+        "name": str(row.get("name") or "Шаблон"),
+        "description": str(row.get("description") or ""),
+        "notation": str(row.get("notation") or "flow"),
+        "revision": int_or_default(row.get("revision"), 0),
+        "created_at": str(row.get("created_at") or ""),
+        "updated_at": str(row.get("updated_at") or ""),
+    }
+    if include_definition:
+        result["definition"] = json_object(row.get("definition_json"))
+    return result
+
+
+def compact_json(value: object) -> str:
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
 
 
 def custom_node_from_row(row: dict[str, object], *, notation: str) -> ApiNode:
@@ -1246,6 +1731,10 @@ def graph_api_schema() -> dict[str, object]:
             "POST /api/graph/annotations",
             "POST /api/graph/annotations/batch",
             "POST /api/graphs",
+            "GET|POST /api/graph/groups",
+            "DELETE /api/graph/groups/{group_id}",
+            "GET|POST /api/graph/templates",
+            "GET|DELETE /api/graph/templates/{template_id}",
         ],
         "notations": list(SUPPORTED_NOTATIONS),
         "storage": {
@@ -1257,7 +1746,7 @@ def graph_api_schema() -> dict[str, object]:
                 "Topic",
                 "ModelRun",
             ],
-            "ui_state": ["GraphAnnotation"],
+            "ui_state": ["GraphAnnotation", "GraphGroup", "GraphTemplate"],
             "custom_graph": ["GraphDocument", "GraphNode", "GraphConnection"],
         },
         "node": {

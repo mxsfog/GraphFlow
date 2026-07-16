@@ -11,8 +11,12 @@ from electromotiv_pipeline.config import build_config
 from electromotiv_pipeline.graph_api import (
     ConflictError,
     custom_graph_payload,
+    get_graph_template,
+    list_graph_groups,
     orient_rows,
     save_graph_annotation,
+    save_graph_group,
+    save_graph_template,
 )
 from electromotiv_pipeline.models import RankedLink
 from electromotiv_pipeline.orientdb import OrientDBClient
@@ -163,3 +167,47 @@ def test_run_history_annotations_and_custom_graph() -> None:
     reduced_graph = custom_graph_payload(client=client, graph_id=graph_id, notation="flow")
     assert {node["id"] for node in reduced_graph["nodes"]} == {"a", "c"}
     assert reduced_graph["edges"] == []
+
+    saved_group = save_graph_group(
+        client,
+        {
+            "graph_id": f"graph:{graph_id}",
+            "notation": "flow",
+            "group_id": "integration-group",
+            "title": "Integration group",
+            "node_ids": ["a", "c"],
+            "child_group_ids": [],
+            "collapsed": True,
+            "revision": 0,
+        },
+    )
+    assert saved_group["revision"] == 1
+    assert (
+        list_graph_groups(
+            client,
+            graph_id=f"graph:{graph_id}",
+            notation="flow",
+        )[0]["collapsed"]
+        is True
+    )
+
+    template_id = f"integration-template-{uuid4().hex}"
+    saved_template = save_graph_template(
+        client,
+        {
+            "template_id": template_id,
+            "name": "Integration template",
+            "notation": "flow",
+            "revision": 0,
+            "definition": {
+                "nodes": [
+                    {"id": "a", "label": "A", "type": "task"},
+                    {"id": "c", "label": "C", "type": "result"},
+                ],
+                "edges": [{"id": "a-c", "source": "a", "target": "c"}],
+                "groups": [],
+            },
+        },
+    )
+    assert saved_template["revision"] == 1
+    assert get_graph_template(client, template_id=template_id)["definition"]["nodes"]

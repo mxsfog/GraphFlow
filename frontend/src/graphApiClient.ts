@@ -13,6 +13,66 @@ export type AnnotationResult = {
   revision: number;
 };
 
+export type GraphGroupRecord = {
+  graph_id: string;
+  notation: string;
+  group_id: string;
+  title: string;
+  node_ids: string[];
+  child_group_ids: string[];
+  collapsed: boolean;
+  revision: number;
+  created_at: string;
+  updated_at: string;
+};
+
+export type GraphTemplateNode = {
+  id: string;
+  label: string;
+  type: string;
+  shape: string;
+  created_at: string;
+  x: number;
+  y: number;
+  position3d: { x: number; y: number; z: number };
+  image_data: string;
+  properties: unknown[];
+};
+
+export type GraphTemplateEdge = {
+  id: string;
+  source: string;
+  target: string;
+  type: string;
+  label: string;
+  properties: unknown[];
+};
+
+export type GraphTemplateGroup = {
+  group_id: string;
+  title: string;
+  node_ids: string[];
+  child_group_ids: string[];
+  collapsed: boolean;
+};
+
+export type GraphTemplateDefinition = {
+  nodes: GraphTemplateNode[];
+  edges: GraphTemplateEdge[];
+  groups: GraphTemplateGroup[];
+};
+
+export type GraphTemplateRecord = {
+  template_id: string;
+  name: string;
+  description: string;
+  notation: string;
+  revision: number;
+  created_at: string;
+  updated_at: string;
+  definition?: GraphTemplateDefinition;
+};
+
 export class AuthError extends Error {
   constructor() {
     super('Graph API authentication failed');
@@ -57,12 +117,96 @@ export async function saveCustomGraphDefinition(
   await postJson(`${apiBaseUrl}/api/graphs`, authToken, payload);
 }
 
+export function loadGraphGroups(
+  apiBaseUrl: string,
+  authToken: string,
+  graphId: string,
+  notation: string,
+  signal: AbortSignal,
+): Promise<{ groups: GraphGroupRecord[] }> {
+  const query = new URLSearchParams({ graph_id: graphId, notation });
+  return loadJson(`${apiBaseUrl}/api/graph/groups?${query}`, signal, authToken);
+}
+
+export function saveGraphGroup(
+  apiBaseUrl: string,
+  authToken: string,
+  payload: Omit<GraphGroupRecord, 'created_at' | 'updated_at'>,
+): Promise<GraphGroupRecord & { saved: boolean }> {
+  return postJson(`${apiBaseUrl}/api/graph/groups`, authToken, payload);
+}
+
+export function deleteGraphGroup(
+  apiBaseUrl: string,
+  authToken: string,
+  graphId: string,
+  notation: string,
+  groupId: string,
+): Promise<{ deleted: boolean; group_id: string }> {
+  const query = new URLSearchParams({ graph_id: graphId, notation });
+  return deleteJson(
+    `${apiBaseUrl}/api/graph/groups/${encodeURIComponent(groupId)}?${query}`,
+    authToken,
+  );
+}
+
+export function loadGraphTemplates(
+  apiBaseUrl: string,
+  authToken: string,
+  signal: AbortSignal,
+): Promise<{ templates: GraphTemplateRecord[] }> {
+  return loadJson(`${apiBaseUrl}/api/graph/templates`, signal, authToken);
+}
+
+export function loadGraphTemplate(
+  apiBaseUrl: string,
+  authToken: string,
+  templateId: string,
+  signal: AbortSignal,
+): Promise<GraphTemplateRecord & { definition: GraphTemplateDefinition }> {
+  return loadJson(
+    `${apiBaseUrl}/api/graph/templates/${encodeURIComponent(templateId)}`,
+    signal,
+    authToken,
+  );
+}
+
+export function saveGraphTemplate(
+  apiBaseUrl: string,
+  authToken: string,
+  payload: {
+    template_id: string;
+    name: string;
+    description: string;
+    notation: string;
+    revision: number;
+    definition: GraphTemplateDefinition;
+  },
+): Promise<GraphTemplateRecord & { saved: boolean; definition: GraphTemplateDefinition }> {
+  return postJson(`${apiBaseUrl}/api/graph/templates`, authToken, payload);
+}
+
+export function deleteGraphTemplate(
+  apiBaseUrl: string,
+  authToken: string,
+  templateId: string,
+): Promise<{ deleted: boolean; template_id: string }> {
+  return deleteJson(
+    `${apiBaseUrl}/api/graph/templates/${encodeURIComponent(templateId)}`,
+    authToken,
+  );
+}
+
 function postJson<T>(url: string, authToken: string, payload: object): Promise<T> {
   return requestJson<T>(url, authToken, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
   });
+}
+
+function deleteJson<T>(url: string, authToken: string): Promise<T> {
+  return requestJson<T>(url, authToken, { method: 'DELETE' });
 }
 
 async function requestJson<T>(url: string, authToken: string, init: RequestInit): Promise<T> {

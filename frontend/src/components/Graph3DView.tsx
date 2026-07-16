@@ -17,6 +17,7 @@ import {
   SphereGeometry,
   Sprite,
   SpriteMaterial,
+  TextureLoader,
 } from 'three';
 
 export type Position3D = { x: number; y: number; z: number };
@@ -26,6 +27,7 @@ export type Graph3DNode = Position3D & {
   label: string;
   nodeType: string;
   shape: string;
+  imageUrl: string;
 };
 
 export type Graph3DLink = {
@@ -41,6 +43,7 @@ type Graph3DViewProps = {
   links: Graph3DLink[];
   selectedNodeId?: string;
   selectedEdgeId?: string;
+  invertedBackground: boolean;
   onSelectNode: (id: string) => void;
   onSelectEdge: (id: string) => void;
   onClearSelection: () => void;
@@ -77,12 +80,15 @@ const LINK_COLORS: Record<string, string> = {
 const BOX_SHAPES = new Set(['component', 'class', 'document']);
 const LARGE_NODE_TYPES = new Set(['actor', 'storage', 'model']);
 const ANIMATED_EDGE_TYPES = new Set(['todo', 'follow', 'decision', 'found', 'score']);
+const TEXTURE_LOADER = new TextureLoader().setCrossOrigin('anonymous');
+const IMAGE_TEXTURES = new Map<string, ReturnType<TextureLoader['load']>>();
 
 export default function Graph3DView({
   nodes,
   links,
   selectedNodeId,
   selectedEdgeId,
+  invertedBackground,
   onSelectNode,
   onSelectEdge,
   onClearSelection,
@@ -144,13 +150,17 @@ export default function Graph3DView({
   }
 
   return (
-    <div className="graph-3d" ref={containerRef} data-testid="graph-3d">
+    <div
+      className={`graph-3d${invertedBackground ? '' : ' is-light'}`}
+      ref={containerRef}
+      data-testid="graph-3d"
+    >
       <ForceGraph3D<Graph3DNode, Graph3DLink>
         ref={graphRef}
         width={size.width}
         height={size.height}
         graphData={graphData}
-        backgroundColor="#111418"
+        backgroundColor={invertedBackground ? '#111418' : '#f8fafc'}
         controlType="orbit"
         showNavInfo={false}
         enableNodeDrag
@@ -160,16 +170,18 @@ export default function Graph3DView({
         nodeVal={(node) => nodeSize(node.nodeType)}
         nodeColor={(node) => nodeColor(node.nodeType, String(node.id) === selectedNodeId)}
         linkLabel={(link) => tooltip(link.label || link.edgeType, link.edgeType)}
-        linkColor={(link) => linkColor(link.edgeType, String(link.id) === selectedEdgeId)}
+        linkColor={(link) =>
+          linkColor(link.edgeType, String(link.id) === selectedEdgeId, invertedBackground)
+        }
         linkWidth={(link) => (String(link.id) === selectedEdgeId ? 3.4 : 1.6)}
         linkOpacity={0.78}
         linkDirectionalArrowLength={5}
         linkDirectionalArrowRelPos={0.88}
-        linkDirectionalArrowColor={(link) => linkColor(link.edgeType, false)}
+        linkDirectionalArrowColor={(link) => linkColor(link.edgeType, false, invertedBackground)}
         linkDirectionalParticles={(link) => animatedLink(link.edgeType) ? 2 : 0}
         linkDirectionalParticleWidth={2.2}
         linkDirectionalParticleSpeed={0.006}
-        linkDirectionalParticleColor={(link) => linkColor(link.edgeType, false)}
+        linkDirectionalParticleColor={(link) => linkColor(link.edgeType, false, invertedBackground)}
         onNodeClick={focusNode}
         onNodeDragEnd={(node) => onNodePositionChange(String(node.id), spatialPosition(node))}
         onLinkClick={(link: LinkObject<Graph3DNode, Graph3DLink>) =>
@@ -204,6 +216,11 @@ function createNodeObject(node: NodeObject<Graph3DNode>, selected: boolean): Gro
   const size = nodeSize(node.nodeType);
   const group = new Group();
   group.add(new Mesh(nodeGeometry(node.shape, node.nodeType, size), material));
+  if (node.imageUrl) {
+    const image = imageSprite(node.imageUrl);
+    image.position.set(0, size + 25, 0);
+    group.add(image);
+  }
   const label = labelSprite(node.label, selected);
   label.position.set(0, size + 8, 0);
   group.add(label);
@@ -246,12 +263,30 @@ function labelSprite(label: string, selected: boolean): Sprite {
   return sprite;
 }
 
+function imageSprite(imageUrl: string): Sprite {
+  let texture = IMAGE_TEXTURES.get(imageUrl);
+  if (!texture) {
+    texture = TEXTURE_LOADER.load(imageUrl, undefined, undefined, () => {
+      IMAGE_TEXTURES.delete(imageUrl);
+    });
+    IMAGE_TEXTURES.set(imageUrl, texture);
+  }
+  const sprite = new Sprite(
+    new SpriteMaterial({ map: texture, transparent: true, depthWrite: false }),
+  );
+  sprite.scale.set(24, 24, 1);
+  return sprite;
+}
+
 function nodeColor(nodeType: string, selected: boolean): string {
   return selected ? '#facc15' : NODE_COLORS[nodeType] || '#60a5fa';
 }
 
-function linkColor(edgeType: string, selected: boolean): string {
-  return selected ? '#facc15' : LINK_COLORS[edgeType] || '#cbd5e1';
+function linkColor(edgeType: string, selected: boolean, invertedBackground: boolean): string {
+  if (selected) {
+    return '#facc15';
+  }
+  return LINK_COLORS[edgeType] || (invertedBackground ? '#cbd5e1' : '#475569');
 }
 
 function nodeSize(nodeType: string): number {

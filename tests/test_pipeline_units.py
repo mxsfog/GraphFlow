@@ -25,8 +25,11 @@ from electromotiv_pipeline.graph_api import (
     is_authorized,
     merge_edge_style,
     merge_style,
+    normalize_template_definition,
     notation_shape,
+    runtime_edges,
     validate_annotation_payload,
+    validate_group_hierarchy,
 )
 from electromotiv_pipeline.models import Article, RankedLink
 from electromotiv_pipeline.openrouter import (
@@ -312,6 +315,17 @@ def test_graph_api_use_case_style() -> None:
     assert edge_style["strokeDasharray"] == "6 4"
 
 
+def test_search_graph_connects_found_news_to_rss_component() -> None:
+    edges = runtime_edges(
+        run_row={},
+        links=[{"title": "News", "url": "https://example.com", "source": "Example"}],
+        notation="flow",
+    )
+    found_edge = next(edge for edge in edges if edge.type == "found")
+
+    assert found_edge.source == "component:rss"
+
+
 def test_graph_api_validates_3d_position() -> None:
     validate_annotation_payload(
         "node",
@@ -339,6 +353,56 @@ def test_graph_api_basic_auth() -> None:
     assert is_authorized(f"Basic {token}", auth)
     assert not is_authorized("Basic broken", auth)
     assert not is_authorized(None, auth)
+
+
+def test_graph_group_hierarchy_rejects_cycles_and_duplicate_membership() -> None:
+    with pytest.raises(ValueError, match="цикл"):
+        validate_group_hierarchy(
+            [
+                {"group_id": "a", "node_ids": ["node-a"], "child_group_ids": ["b"]},
+                {"group_id": "b", "node_ids": ["node-b"], "child_group_ids": ["a"]},
+            ],
+            valid_node_ids={"node-a", "node-b"},
+        )
+    with pytest.raises(ValueError, match="уже входит"):
+        validate_group_hierarchy(
+            [
+                {"group_id": "a", "node_ids": ["shared"], "child_group_ids": []},
+                {"group_id": "b", "node_ids": ["shared"], "child_group_ids": []},
+            ],
+            valid_node_ids={"shared"},
+        )
+
+
+def test_graph_template_normalization_validates_references() -> None:
+    definition = normalize_template_definition(
+        {
+            "nodes": [
+                {"id": "a", "label": "A", "type": "task"},
+                {"id": "b", "label": "B", "type": "result"},
+            ],
+            "edges": [{"id": "a-b", "source": "a", "target": "b", "type": "follow"}],
+            "groups": [
+                {
+                    "group_id": "pair",
+                    "title": "Пара",
+                    "node_ids": ["a", "b"],
+                    "child_group_ids": [],
+                    "collapsed": False,
+                }
+            ],
+        }
+    )
+
+    assert len(definition["nodes"]) == 2
+    assert definition["groups"][0]["group_id"] == "pair"
+    with pytest.raises(ValueError, match="отсутствующий узел"):
+        normalize_template_definition(
+            {
+                "nodes": [{"id": "a"}],
+                "edges": [{"id": "broken", "source": "a", "target": "missing"}],
+            }
+        )
 
 
 def test_parse_document_graph_accepts_markdown_fence() -> None:

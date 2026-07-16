@@ -8,5 +8,5 @@
     "rootDir": ".",
     "outDir": "../.runtime/frontend-tests"
   },
-  "include": ["src/graphLayout.ts"]
+  "include": ["src/graphLayout.ts", "src/graphWorkspace.ts"]
 }

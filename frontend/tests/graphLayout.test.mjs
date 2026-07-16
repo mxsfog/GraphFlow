@@ -59,3 +59,35 @@ test('structure располагает связанные уровни свер�
 
   assert.ok(positions.get('root').y < positions.get('child').y);
 });
+
+test('overview учитывает связи всех типов и формирует уровни', () => {
+  const positions = arrangeGraphNodes(
+    [node('actor'), node('run'), node('rss'), node('news'), node('source')],
+    [
+      { source: 'actor', target: 'run', type: 'request' },
+      { source: 'run', target: 'rss', type: 'request' },
+      { source: 'rss', target: 'news', type: 'found' },
+      { source: 'news', target: 'source', type: 'from_source' },
+    ],
+    'overview',
+  );
+
+  assert.ok(positions.get('actor').x < positions.get('run').x);
+  assert.ok(positions.get('run').x < positions.get('rss').x);
+  assert.ok(positions.get('rss').x < positions.get('news').x);
+  assert.ok(positions.get('news').x < positions.get('source').x);
+});
+
+test('узлы одного уровня получают разные вертикальные позиции', () => {
+  const positions = arrangeGraphNodes(
+    [node('root'), node('left'), node('center'), node('right')],
+    [
+      { source: 'root', target: 'left', type: 'contains' },
+      { source: 'root', target: 'center', type: 'contains' },
+      { source: 'root', target: 'right', type: 'contains' },
+    ],
+    'overview',
+  );
+
+  assert.equal(new Set(['left', 'center', 'right'].map((id) => positions.get(id).y)).size, 3);
+});

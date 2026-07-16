@@ -18,14 +18,36 @@ import type { CSSProperties, FormEvent } from 'react';
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   AuthError,
+  deleteGraphGroup,
+  deleteGraphTemplate,
   encodeBasicAuth,
   loadJson,
+  loadGraphGroups,
+  loadGraphTemplate,
+  loadGraphTemplates,
   saveAnnotation,
   saveAnnotationsBatch,
   saveCustomGraphDefinition,
+  saveGraphGroup,
+  saveGraphTemplate,
+  type GraphGroupRecord,
+  type GraphTemplateDefinition,
+  type GraphTemplateEdge,
+  type GraphTemplateGroup,
+  type GraphTemplateNode,
+  type GraphTemplateRecord,
 } from '../graphApiClient';
 import { arrangeGraphNodes, parseCreatedAt, type LayoutMode } from '../graphLayout';
+import {
+  descendantNodeIds,
+  groupIdFromNode,
+  groupNodeId,
+  projectWorkspace,
+  recursiveGroupNodeIds,
+  type GroupProjection,
+} from '../graphWorkspace';
 import type { Graph3DLink, Graph3DNode, Position3D } from './Graph3DView';
+import { ReadableEdge, type EdgeRoutingData } from './ReadableEdge';
 
 const Graph3DView = lazy(() => import('./Graph3DView'));
 
@@ -116,13 +138,15 @@ type NotationNodeData = {
   raw: Record<string, unknown>;
 };
 
-type EditableEdgeData = {
+type EditableEdgeData = EdgeRoutingData & {
   label: string;
   edgeType: string;
   properties: EditableProperty[];
   annotationRevision: number;
   base: BaseEdgeState;
   raw: Record<string, unknown>;
+  sourceEdgeIds?: string[];
+  aggregateCount?: number;
 };
 
 type SystemBoundaryData = {
@@ -168,25 +192,32 @@ const EDGE_TYPES = [
   'reference',
 ];
 const EDGE_TYPE_STYLES: Record<string, CSSProperties> = {
-  todo: { stroke: '#dc2626', strokeWidth: 3.6, strokeDasharray: '8 5' },
-  follow: { stroke: '#2563eb', strokeWidth: 3.8 },
-  include: { stroke: '#334155', strokeWidth: 3.0, strokeDasharray: '6 4' },
-  properties: { stroke: '#0f766e', strokeWidth: 3.2, strokeDasharray: '3 4' },
-  decision: { stroke: '#ea580c', strokeWidth: 3.4 },
-  from_source: { stroke: '#ea580c', strokeWidth: 3.2 },
-  source: { stroke: '#ea580c', strokeWidth: 3.2 },
-  about: { stroke: '#059669', strokeWidth: 3.2 },
-  score: { stroke: '#059669', strokeWidth: 3.2 },
-  contains: { stroke: '#059669', strokeWidth: 3.2 },
-  analyzed_by: { stroke: '#7c3aed', strokeWidth: 3.4 },
+  todo: { stroke: '#dc2626', strokeWidth: 2.4, strokeDasharray: '7 5' },
+  follow: { stroke: '#2563eb', strokeWidth: 2.4 },
+  include: { stroke: '#475569', strokeWidth: 2.1, strokeDasharray: '6 4' },
+  properties: { stroke: '#0f766e', strokeWidth: 2.1, strokeDasharray: '3 4' },
+  decision: { stroke: '#ea580c', strokeWidth: 2.4 },
+  request: { stroke: '#2563eb', strokeWidth: 2.2 },
+  found: { stroke: '#0891b2', strokeWidth: 2.2 },
+  from_source: { stroke: '#d97706', strokeWidth: 2.2 },
+  source: { stroke: '#d97706', strokeWidth: 2.2 },
+  about: { stroke: '#059669', strokeWidth: 2.2 },
+  score: { stroke: '#7c3aed', strokeWidth: 2.2 },
+  contains: { stroke: '#059669', strokeWidth: 2.2 },
+  analyzed_by: { stroke: '#7c3aed', strokeWidth: 2.2 },
+  saved_to: { stroke: '#64748b', strokeWidth: 2.2 },
+  exported_to: { stroke: '#64748b', strokeWidth: 2.2, strokeDasharray: '6 4' },
 };
-const DEFAULT_EDGE_TYPE_STYLE: CSSProperties = { stroke: '#475569', strokeWidth: 3.2 };
-const ANIMATED_EDGE_TYPES = new Set(['decision', 'follow', 'todo']);
+const DEFAULT_EDGE_TYPE_STYLE: CSSProperties = { stroke: '#64748b', strokeWidth: 2.1 };
+const ANIMATED_EDGE_TYPES = new Set<string>();
+const CHILD_EDGE_TYPES = new Set(['contains', 'include', 'properties']);
 
 const nodeTypes = {
   notationNode: NotationNode,
   systemBoundary: SystemBoundary,
+  graphGroup: GraphGroupNode,
 };
+const flowEdgeTypes = { readable: ReadableEdge };
 
 export function GraphViewer({ apiBaseUrl }: GraphViewerProps) {
   const [authToken, setAuthToken] = useState('');
@@ -194,6 +225,9 @@ export function GraphViewer({ apiBaseUrl }: GraphViewerProps) {
   const [loginForm, setLoginForm] = useState({ username: '', password: '' });
   const [notation, setNotation] = useState<Notation>('flow');
   const [viewMode, setViewMode] = useState<ViewMode>('2d');
+  const [invertedBackground, setInvertedBackground] = useState(
+    () => window.localStorage.getItem('graphflow-background') !== 'light',
+  );
   const [runs, setRuns] = useState<SearchRunSummary[]>([]);
   const [selectedRunId, setSelectedRunId] = useState('');
   const [payload, setPayload] = useState<GraphPayload | null>(null);
@@ -204,6 +238,11 @@ export function GraphViewer({ apiBaseUrl }: GraphViewerProps) {
   const [hiddenNodeTypes, setHiddenNodeTypes] = useState<string[]>([]);
   const [hiddenEdgeTypes, setHiddenEdgeTypes] = useState<string[]>([]);
   const [graphRefresh, setGraphRefresh] = useState(0);
+  const [groups, setGroups] = useState<GraphGroupRecord[]>([]);
+  const [templates, setTemplates] = useState<GraphTemplateRecord[]>([]);
+  const [selectedGroupIds, setSelectedGroupIds] = useState<string[]>([]);
+  const [groupRefresh, setGroupRefresh] = useState(0);
+  const [templateRefresh, setTemplateRefresh] = useState(0);
   const [flowInstance, setFlowInstance] = useState<ReactFlowInstance<Node<NotationNodeData>, Edge<EditableEdgeData>> | null>(null);
   const [nodes, setNodes, onNodesChange] = useNodesState<Node<NotationNodeData>>([]);
   const [edges, setEdges, onEdgesChange] = useEdgesState<Edge<EditableEdgeData>>([]);
@@ -227,12 +266,16 @@ export function GraphViewer({ apiBaseUrl }: GraphViewerProps) {
     () => uniqueValues(edges.map((edge) => edgeData(edge).edgeType)),
     [edges],
   );
-  const visibleNodes = useMemo(
+  const selectedNodeIds = useMemo(
+    () => nodes.filter((node) => node.selected && !node.id.startsWith('__')).map((node) => node.id),
+    [nodes],
+  );
+  const filteredNodes = useMemo(
     () => nodes.filter((node) => !hiddenNodeTypes.includes(node.data.nodeType)),
     [hiddenNodeTypes, nodes],
   );
-  const visibleEdges = useMemo(() => {
-    const visibleNodeIds = new Set(visibleNodes.map((node) => node.id));
+  const filteredEdges = useMemo(() => {
+    const visibleNodeIds = new Set(filteredNodes.map((node) => node.id));
     return edges.filter((edge) => {
       const type = edgeData(edge).edgeType;
       return (
@@ -241,15 +284,80 @@ export function GraphViewer({ apiBaseUrl }: GraphViewerProps) {
         !hiddenEdgeTypes.includes(type)
       );
     });
-  }, [edges, hiddenEdgeTypes, visibleNodes]);
+  }, [edges, filteredNodes, hiddenEdgeTypes]);
+  const workspaceProjection = useMemo(
+    () => projectWorkspace(
+      filteredNodes
+        .filter((node) => !node.id.startsWith('__'))
+        .map((node) => ({
+          id: node.id,
+          position: node.position,
+          width: node.measured?.width,
+          height: node.measured?.height,
+        })),
+      filteredEdges.map((edge) => ({
+        id: edge.id,
+        source: edge.source,
+        target: edge.target,
+        type: edgeData(edge).edgeType,
+        label: edgeData(edge).label,
+      })),
+      groups,
+    ),
+    [filteredEdges, filteredNodes, groups],
+  );
+  const visibleNodes = useMemo(() => {
+    const graphNodes = filteredNodes.filter(
+      (node) => !workspaceProjection.hiddenNodeIds.has(node.id),
+    );
+    return [
+      ...workspaceProjection.groups.map(groupProjectionNode),
+      ...graphNodes,
+    ];
+  }, [filteredNodes, workspaceProjection]);
+  const visibleEdges = useMemo(() => {
+    const edgesById = new Map(filteredEdges.map((edge) => [edge.id, edge]));
+    const projected = workspaceProjection.edges.flatMap((edge) => {
+      const source = edgesById.get(edge.sourceEdgeIds[0]);
+      if (!source) {
+        return [];
+      }
+      if (edge.id === source.id && edge.count === 1) {
+        return [source];
+      }
+      const data = edgeData(source);
+      const label = edge.count > 1 ? `${data.edgeType} · ${edge.count}` : data.label;
+      return [withEdgePresentation(
+        {
+          ...source,
+          id: edge.id,
+          source: edge.source,
+          target: edge.target,
+          selected: false,
+        },
+        {
+          ...data,
+          label,
+          showLabel: true,
+          sourceEdgeIds: edge.sourceEdgeIds,
+          aggregateCount: edge.count,
+        },
+      )];
+    });
+    return routeFlowEdges(projected, visibleNodes);
+  }, [filteredEdges, visibleNodes, workspaceProjection.edges]);
   const graph3dNodes = useMemo<Graph3DNode[]>(
     () => visibleNodes
-      .filter((node) => !node.id.startsWith('__'))
+      .filter((node) => (
+        node.id !== '__system_boundary'
+        && (!groupIdFromNode(node.id) || Boolean(node.data.raw.collapsed))
+      ))
       .map((node) => ({
         id: node.id,
         label: node.data.label,
         nodeType: node.data.nodeType,
         shape: node.data.shape,
+        imageUrl: node.data.imageUrl,
         ...node.data.position3d,
       })),
     [visibleNodes],
@@ -266,10 +374,19 @@ export function GraphViewer({ apiBaseUrl }: GraphViewerProps) {
   );
 
   useEffect(() => {
+    window.localStorage.setItem('graphflow-background', invertedBackground ? 'dark' : 'light');
+  }, [invertedBackground]);
+
+  useEffect(() => {
     if (selected?.kind === 'node' && !visibleNodes.some((node) => node.id === selected.id)) {
       setSelected(null);
     }
-    if (selected?.kind === 'edge' && !visibleEdges.some((edge) => edge.id === selected.id)) {
+    if (
+      selected?.kind === 'edge'
+      && !visibleEdges.some((edge) => (
+        edge.id === selected.id || edgeData(edge).sourceEdgeIds?.includes(selected.id)
+      ))
+    ) {
       setSelected(null);
     }
   }, [selected, visibleEdges, visibleNodes]);
@@ -325,6 +442,41 @@ export function GraphViewer({ apiBaseUrl }: GraphViewerProps) {
   }, [apiBaseUrl, authToken, graphRefresh, notation, selectedRunId]);
 
   useEffect(() => {
+    if (!authToken || !payload?.graph_id) {
+      setGroups([]);
+      return;
+    }
+    const controller = new AbortController();
+    void loadGraphGroups(
+      apiBaseUrl,
+      authToken,
+      payload.graph_id,
+      notation,
+      controller.signal,
+    )
+      .then(({ groups: loadedGroups }) => {
+        setGroups(loadedGroups);
+        setSelectedGroupIds((current) =>
+          current.filter((id) => loadedGroups.some((group) => group.group_id === id)),
+        );
+      })
+      .catch((requestError: Error) => handleRequestError(requestError, setAuthToken, setError));
+    return () => controller.abort();
+  }, [apiBaseUrl, authToken, groupRefresh, notation, payload?.graph_id]);
+
+  useEffect(() => {
+    if (!authToken) {
+      setTemplates([]);
+      return;
+    }
+    const controller = new AbortController();
+    void loadGraphTemplates(apiBaseUrl, authToken, controller.signal)
+      .then(({ templates: loadedTemplates }) => setTemplates(loadedTemplates))
+      .catch((requestError: Error) => handleRequestError(requestError, setAuthToken, setError));
+    return () => controller.abort();
+  }, [apiBaseUrl, authToken, templateRefresh]);
+
+  useEffect(() => {
     const graph = toReactFlow(payload);
     setNodes(graph.nodes);
     setEdges(graph.edges);
@@ -332,6 +484,7 @@ export function GraphViewer({ apiBaseUrl }: GraphViewerProps) {
     setSaveStatus('');
     setHiddenNodeTypes([]);
     setHiddenEdgeTypes([]);
+    setSelectedGroupIds([]);
     for (const timer of saveTimers.current.values()) {
       clearTimeout(timer);
     }
@@ -483,6 +636,9 @@ export function GraphViewer({ apiBaseUrl }: GraphViewerProps) {
     setRuns([]);
     setNodes([]);
     setEdges([]);
+    setGroups([]);
+    setTemplates([]);
+    setSelectedGroupIds([]);
     setSelected(null);
     setLoginForm({ username: '', password: '' });
     setSaveStatus('');
@@ -543,8 +699,16 @@ export function GraphViewer({ apiBaseUrl }: GraphViewerProps) {
       return;
     }
     const next = { ...current, position };
-    setNodes((currentNodes) => currentNodes.map((node) => (node.id === id ? next : node)));
+    const nextNodes = nodes.map((node) => (node.id === id ? next : node));
+    setNodes(nextNodes);
+    setEdges((currentEdges) => routeFlowEdges(currentEdges, nextNodes));
     persistNode(next);
+  }
+
+  function completeNodeDrag(node: Node<NotationNodeData>) {
+    const nextNodes = nodes.map((current) => (current.id === node.id ? node : current));
+    setEdges((currentEdges) => routeFlowEdges(currentEdges, nextNodes));
+    persistNode(node, true);
   }
 
   function updateNodePosition3D(id: string, position3d: Position3D, immediate = false) {
@@ -652,6 +816,272 @@ export function GraphViewer({ apiBaseUrl }: GraphViewerProps) {
     setHiddenEdgeTypes((current) => toggleValue(current, type));
   }
 
+  async function persistGroup(
+    group: Omit<GraphGroupRecord, 'created_at' | 'updated_at'>,
+  ): Promise<GraphGroupRecord | null> {
+    setSaveStatus('Сохранение группы...');
+    try {
+      const saved = await saveGraphGroup(apiBaseUrl, authToken, group);
+      setGroups((current) => [
+        ...current.filter((item) => item.group_id !== saved.group_id),
+        saved,
+      ]);
+      setError('');
+      setSaveStatus('Сохранено');
+      return saved;
+    } catch (requestError) {
+      handleRequestError(requestError as Error, setAuthToken, setError, setSaveStatus);
+      setGroupRefresh((value) => value + 1);
+      return null;
+    }
+  }
+
+  async function createGroup(title: string) {
+    if (!payload?.graph_id) {
+      return;
+    }
+    const groupsById = new Map(groups.map((group) => [group.group_id, group]));
+    const nodesInSelectedGroups = new Set(
+      selectedGroupIds.flatMap((groupId) => [...recursiveGroupNodeIds(groupId, groupsById)]),
+    );
+    const nodeIds = selectedNodeIds.filter((nodeId) => !nodesInSelectedGroups.has(nodeId));
+    const directOwners = new Map(
+      groups.flatMap((group) => group.node_ids.map((nodeId) => [nodeId, group.group_id] as const)),
+    );
+    const occupiedNode = nodeIds.find((nodeId) => directOwners.has(nodeId));
+    if (occupiedNode) {
+      setError(`Узел уже входит в группу ${directOwners.get(occupiedNode)}.`);
+      return;
+    }
+    if (nodeIds.length + selectedGroupIds.length < 2) {
+      setError('Для группирования выберите не менее двух узлов или групп.');
+      return;
+    }
+    const saved = await persistGroup({
+      graph_id: payload.graph_id,
+      notation,
+      group_id: uniqueId('group'),
+      title: title.trim() || 'Новая группа',
+      node_ids: nodeIds,
+      child_group_ids: selectedGroupIds,
+      collapsed: false,
+      revision: 0,
+    });
+    if (saved) {
+      setSelectedGroupIds([]);
+    }
+  }
+
+  async function toggleGroup(groupId: string) {
+    const group = groups.find((item) => item.group_id === groupId);
+    if (!group) {
+      return;
+    }
+    await persistGroup({
+      graph_id: group.graph_id,
+      notation: group.notation,
+      group_id: group.group_id,
+      title: group.title,
+      node_ids: group.node_ids,
+      child_group_ids: group.child_group_ids,
+      collapsed: !group.collapsed,
+      revision: group.revision,
+    });
+  }
+
+  async function setAllGroupsCollapsed(collapsed: boolean) {
+    const changed = groups.filter((group) => group.collapsed !== collapsed);
+    if (changed.length === 0) {
+      return;
+    }
+    setSaveStatus('Сохранение групп...');
+    try {
+      const saved = await Promise.all(
+        changed.map((group) => saveGraphGroup(apiBaseUrl, authToken, {
+          graph_id: group.graph_id,
+          notation: group.notation,
+          group_id: group.group_id,
+          title: group.title,
+          node_ids: group.node_ids,
+          child_group_ids: group.child_group_ids,
+          collapsed,
+          revision: group.revision,
+        })),
+      );
+      const savedById = new Map(saved.map((group) => [group.group_id, group]));
+      setGroups((current) => current.map((group) => savedById.get(group.group_id) || group));
+      setError('');
+      setSaveStatus('Сохранено');
+    } catch (requestError) {
+      handleRequestError(requestError as Error, setAuthToken, setError, setSaveStatus);
+      setGroupRefresh((value) => value + 1);
+    }
+  }
+
+  async function removeGroup(groupId: string) {
+    if (!payload?.graph_id) {
+      return;
+    }
+    setSaveStatus('Удаление группы...');
+    try {
+      await deleteGraphGroup(apiBaseUrl, authToken, payload.graph_id, notation, groupId);
+      setGroups((current) => current.filter((group) => group.group_id !== groupId));
+      setSelectedGroupIds((current) => current.filter((id) => id !== groupId));
+      setGroupRefresh((value) => value + 1);
+      setError('');
+      setSaveStatus('Сохранено');
+    } catch (requestError) {
+      handleRequestError(requestError as Error, setAuthToken, setError, setSaveStatus);
+    }
+  }
+
+  async function collapseSelectedDescendants() {
+    if (!payload?.graph_id || !selectedNode) {
+      setError('Выберите корневой узел дочернего графа.');
+      return;
+    }
+    const descendants = descendantNodeIds(
+      selectedNode.id,
+      edges.map((edge) => ({
+        id: edge.id,
+        source: edge.source,
+        target: edge.target,
+        type: edgeData(edge).edgeType,
+        label: edgeData(edge).label,
+      })),
+      CHILD_EDGE_TYPES,
+    );
+    if (descendants.length === 0) {
+      setError('У выбранного узла нет дочерних связей contains, include или properties.');
+      return;
+    }
+    await persistGroup({
+      graph_id: payload.graph_id,
+      notation,
+      group_id: uniqueId('children'),
+      title: `Дочерние: ${selectedNode.data.label}`,
+      node_ids: descendants,
+      child_group_ids: [],
+      collapsed: true,
+      revision: 0,
+    });
+  }
+
+  async function saveTemplate(name: string, scope: 'selection' | 'graph') {
+    const realNodes = nodes.filter((node) => !node.id.startsWith('__'));
+    const scopeNodeIds = scope === 'graph'
+      ? new Set(realNodes.map((node) => node.id))
+      : new Set(selectedNodeIds);
+    if (scopeNodeIds.size === 0) {
+      setError('Для шаблона выберите хотя бы один узел.');
+      return;
+    }
+    const definition = templateDefinition(realNodes, edges, groups, scopeNodeIds);
+    setSaveStatus('Сохранение шаблона...');
+    try {
+      await saveGraphTemplate(apiBaseUrl, authToken, {
+        template_id: uniqueId('template'),
+        name: name.trim() || 'Новый шаблон',
+        description: payload?.title || '',
+        notation,
+        revision: 0,
+        definition,
+      });
+      setTemplateRefresh((value) => value + 1);
+      setError('');
+      setSaveStatus('Сохранено');
+    } catch (requestError) {
+      handleRequestError(requestError as Error, setAuthToken, setError, setSaveStatus);
+    }
+  }
+
+  async function applyTemplate(templateId: string) {
+    if (!payload?.graph_id.startsWith('graph:')) {
+      setError('Шаблон можно добавить только в редактируемый пользовательский граф.');
+      return;
+    }
+    const controller = new AbortController();
+    setSaveStatus('Добавление шаблона...');
+    try {
+      const template = await loadGraphTemplate(
+        apiBaseUrl,
+        authToken,
+        templateId,
+        controller.signal,
+      );
+      const instanceId = uniqueId('instance');
+      const nodeIds = new Map(
+        template.definition.nodes.map((node, index) => [
+          node.id,
+          `${instanceId}-node-${index + 1}`,
+        ]),
+      );
+      const groupIds = new Map(
+        template.definition.groups.map((group, index) => [
+          group.group_id,
+          `${instanceId}-group-${index + 1}`,
+        ]),
+      );
+      const maxX = Math.max(0, ...nodes
+        .filter((node) => !node.id.startsWith('__'))
+        .map((node) => node.position.x + (node.measured?.width || 220)));
+      const insertedNodes = template.definition.nodes.map((node) => ({
+        ...node,
+        id: nodeIds.get(node.id)!,
+        x: node.x + maxX + 180,
+        y: node.y,
+        position3d: { ...node.position3d, x: node.position3d.x + 80 },
+      }));
+      const insertedEdges = template.definition.edges.map((edge, index) => ({
+        ...edge,
+        id: `${instanceId}-edge-${index + 1}`,
+        source: nodeIds.get(edge.source)!,
+        target: nodeIds.get(edge.target)!,
+      }));
+      const graphId = payload.graph_id.replace(/^graph:/, '');
+      await saveCustomGraphDefinition(apiBaseUrl, authToken, {
+        graph_id: graphId,
+        title: payload.title || 'Пользовательский граф',
+        source_type: 'manual',
+        nodes: [
+          ...nodes.filter((node) => !node.id.startsWith('__')).map(customNodePayload),
+          ...insertedNodes,
+        ],
+        edges: [...edges.map(customEdgePayload), ...insertedEdges],
+      });
+      for (const group of childFirstGroups(template.definition.groups)) {
+        await saveGraphGroup(apiBaseUrl, authToken, {
+          graph_id: payload.graph_id,
+          notation,
+          group_id: groupIds.get(group.group_id)!,
+          title: group.title,
+          node_ids: group.node_ids.map((id) => nodeIds.get(id)!),
+          child_group_ids: group.child_group_ids.map((id) => groupIds.get(id)!),
+          collapsed: group.collapsed,
+          revision: 0,
+        });
+      }
+      setGraphRefresh((value) => value + 1);
+      setGroupRefresh((value) => value + 1);
+      setError('');
+      setSaveStatus('Сохранено');
+    } catch (requestError) {
+      handleRequestError(requestError as Error, setAuthToken, setError, setSaveStatus);
+    }
+  }
+
+  async function removeTemplate(templateId: string) {
+    setSaveStatus('Удаление шаблона...');
+    try {
+      await deleteGraphTemplate(apiBaseUrl, authToken, templateId);
+      setTemplates((current) => current.filter((item) => item.template_id !== templateId));
+      setError('');
+      setSaveStatus('Сохранено');
+    } catch (requestError) {
+      handleRequestError(requestError as Error, setAuthToken, setError, setSaveStatus);
+    }
+  }
+
   async function saveGraphDefinition(
     graphId: string,
     title: string,
@@ -734,23 +1164,25 @@ export function GraphViewer({ apiBaseUrl }: GraphViewerProps) {
       source,
       target,
       label: edgeType,
-      type: 'straight',
+      type: 'readable',
       data: {
         label: edgeType,
         edgeType,
+        showLabel: true,
         properties: [],
         annotationRevision: 0,
         base,
         raw: { class: 'GraphConnection' },
       },
       style: edgeTypeStyle(edgeType),
-      markerEnd: { type: MarkerType.ArrowClosed },
+      markerEnd: { type: MarkerType.ArrowClosed, width: 16, height: 16 },
     };
+    const nextEdges = routeFlowEdges([...edges, edge], nodes);
     void saveGraphDefinition(
       payload.graph_id.replace(/^graph:/, ''),
       payload.title || 'Пользовательский граф',
       nodes,
-      [...edges, edge],
+      nextEdges,
     );
   }
 
@@ -772,7 +1204,12 @@ export function GraphViewer({ apiBaseUrl }: GraphViewerProps) {
     const arrangedById = new Map(arrangedVisible.map((node) => [node.id, node]));
     const arranged = nodes.map((node) => arrangedById.get(node.id) || node);
     setNodes(arranged);
-    window.requestAnimationFrame(() => flowInstance?.fitView({ padding: 0.18, duration: 300 }));
+    setEdges((currentEdges) =>
+      routeFlowEdges(currentEdges, arranged, mode === 'structure' ? 'vertical' : 'horizontal'),
+    );
+    window.requestAnimationFrame(() =>
+      flowInstance?.fitView({ padding: 0.12, minZoom: 0.58, duration: 300 }),
+    );
     if (!payload?.graph_id) {
       return;
     }
@@ -821,15 +1258,17 @@ export function GraphViewer({ apiBaseUrl }: GraphViewerProps) {
 
   return (
     <ReactFlowProvider>
-      <div className="graph-page">
+      <div className={`graph-page${invertedBackground ? ' theme-dark' : ''}`}>
         <header className="graph-toolbar">
           <div>
             <div className="toolbar-title-row">
               <h1>{payload?.title || 'Последний запуск пайплайна'}</h1>
             </div>
             <p>
-              {notationLabel(notation)} / {visibleNodes.length} of {nodes.length} nodes /{' '}
-              {visibleEdges.length} of {edges.length} edges
+              {notationLabel(notation)} / узлы{' '}
+              {visibleNodes.filter((node) => !node.id.startsWith('__')).length} из{' '}
+              {nodes.filter((node) => !node.id.startsWith('__')).length} / связи{' '}
+              {visibleEdges.length} из {edges.length}
             </p>
           </div>
           <div className="toolbar-controls">
@@ -851,6 +1290,14 @@ export function GraphViewer({ apiBaseUrl }: GraphViewerProps) {
                 3D
               </button>
             </div>
+            <label className="background-toggle">
+              <input
+                type="checkbox"
+                checked={invertedBackground}
+                onChange={(event) => setInvertedBackground(event.target.checked)}
+              />
+              Темная тема
+            </label>
             <select
               value={selectedRunId}
               disabled={isLoading}
@@ -901,31 +1348,68 @@ export function GraphViewer({ apiBaseUrl }: GraphViewerProps) {
             nodeOptions={nodes
               .filter((node) => !node.id.startsWith('__'))
               .map((node) => ({ id: node.id, label: node.data.label }))}
+            groups={groups}
+            templates={templates}
+            selectedNodeCount={selectedNodeIds.length}
+            selectedGroupIds={selectedGroupIds}
             onCreateCopy={createEditableCopy}
             onAddNode={addCustomNode}
             onAddEdge={addCustomEdge}
+            onToggleGroupSelection={(groupId) =>
+              setSelectedGroupIds((current) => toggleValue(current, groupId))
+            }
+            onCreateGroup={createGroup}
+            onToggleGroup={toggleGroup}
+            onDeleteGroup={removeGroup}
+            onSetAllGroupsCollapsed={setAllGroupsCollapsed}
+            onCollapseDescendants={collapseSelectedDescendants}
+            canCollapseDescendants={Boolean(selectedNode)}
+            onSaveTemplate={saveTemplate}
+            onApplyTemplate={applyTemplate}
+            onDeleteTemplate={removeTemplate}
           />
-          <section className="graph-canvas" aria-label="Интерактивный граф">
+          <section
+            className={`graph-canvas${invertedBackground ? ' is-inverted' : ''}`}
+            aria-label="Интерактивный граф"
+          >
             {isLoading ? <div className="graph-loading">Загрузка графа...</div> : null}
             {viewMode === '2d' ? (
               <ReactFlow
                 nodes={visibleNodes}
                 edges={visibleEdges}
                 nodeTypes={nodeTypes}
+                edgeTypes={flowEdgeTypes}
                 onInit={setFlowInstance}
                 fitView
-                fitViewOptions={{ padding: 0.18 }}
-                minZoom={0.2}
+                fitViewOptions={{ padding: 0.12, minZoom: 0.58 }}
+                minZoom={0.25}
                 maxZoom={2}
                 onNodesChange={onNodesChange}
                 onEdgesChange={onEdgesChange}
-                onNodeDragStop={(_, node) => persistNode(node as Node<NotationNodeData>, true)}
-                onNodeClick={(_, node) => setSelected({ kind: 'node', id: node.id })}
-                onEdgeClick={(_, edge) => setSelected({ kind: 'edge', id: edge.id })}
+                onNodeDragStop={(_, node) => completeNodeDrag(node as Node<NotationNodeData>)}
+                onNodeClick={(_, node) => {
+                  const groupId = groupIdFromNode(node.id);
+                  if (groupId) {
+                    void toggleGroup(groupId);
+                  } else {
+                    setSelected({ kind: 'node', id: node.id });
+                  }
+                }}
+                onEdgeClick={(_, edge) => setSelected({
+                  kind: 'edge',
+                  id: edgeData(edge as Edge<EditableEdgeData>).sourceEdgeIds?.[0] || edge.id,
+                })}
                 onPaneClick={() => setSelected(null)}
+                selectionOnDrag
+                multiSelectionKeyCode="Control"
+                colorMode={invertedBackground ? 'dark' : 'light'}
                 proOptions={{ hideAttribution: true }}
               >
-                <Background />
+                <Background
+                  color={invertedBackground ? '#303946' : '#cbd5e1'}
+                  gap={24}
+                  size={1}
+                />
                 <Controls />
                 <MiniMap pannable zoomable />
               </ReactFlow>
@@ -936,7 +1420,15 @@ export function GraphViewer({ apiBaseUrl }: GraphViewerProps) {
                   links={graph3dLinks}
                   selectedNodeId={selected?.kind === 'node' ? selected.id : undefined}
                   selectedEdgeId={selected?.kind === 'edge' ? selected.id : undefined}
-                  onSelectNode={(id) => setSelected({ kind: 'node', id })}
+                  invertedBackground={invertedBackground}
+                  onSelectNode={(id) => {
+                    const groupId = groupIdFromNode(id);
+                    if (groupId) {
+                      void toggleGroup(groupId);
+                    } else {
+                      setSelected({ kind: 'node', id });
+                    }
+                  }}
                   onSelectEdge={(id) => setSelected({ kind: 'edge', id })}
                   onClearSelection={() => setSelected(null)}
                   onNodePositionChange={(id, position) =>
@@ -981,28 +1473,37 @@ function LoginView({
 }) {
   return (
     <div className="login-page">
-      <form className="login-form" onSubmit={onSubmit}>
-        <h1>ElectroMotiv Graph</h1>
-        <label>
-          Логин
-          <input
-            value={loginForm.username}
-            autoComplete="username"
-            onChange={(event) => onChange({ ...loginForm, username: event.target.value })}
-          />
-        </label>
-        <label>
-          Пароль
-          <input
-            value={loginForm.password}
-            type="password"
-            autoComplete="current-password"
-            onChange={(event) => onChange({ ...loginForm, password: event.target.value })}
-          />
-        </label>
-        {error ? <div className="login-error">{error}</div> : null}
-        <button type="submit">Войти</button>
-      </form>
+      <div className="login-shell">
+        <div className="login-brand" aria-label="GraphFlow">
+          <span className="login-brand-mark" aria-hidden="true">GF</span>
+          <span>GraphFlow</span>
+        </div>
+        <form className="login-form" onSubmit={onSubmit}>
+          <div className="login-heading">
+            <h1>Вход в систему</h1>
+          </div>
+          <label>
+            Логин
+            <input
+              value={loginForm.username}
+              autoComplete="username"
+              autoFocus
+              onChange={(event) => onChange({ ...loginForm, username: event.target.value })}
+            />
+          </label>
+          <label>
+            Пароль
+            <input
+              value={loginForm.password}
+              type="password"
+              autoComplete="current-password"
+              onChange={(event) => onChange({ ...loginForm, password: event.target.value })}
+            />
+          </label>
+          {error ? <div className="login-error">{error}</div> : null}
+          <button type="submit">Войти</button>
+        </form>
+      </div>
     </div>
   );
 }
@@ -1019,9 +1520,23 @@ function GraphFilters({
   showLayouts,
   editableGraph,
   nodeOptions,
+  groups,
+  templates,
+  selectedNodeCount,
+  selectedGroupIds,
   onCreateCopy,
   onAddNode,
   onAddEdge,
+  onToggleGroupSelection,
+  onCreateGroup,
+  onToggleGroup,
+  onDeleteGroup,
+  onSetAllGroupsCollapsed,
+  onCollapseDescendants,
+  canCollapseDescendants,
+  onSaveTemplate,
+  onApplyTemplate,
+  onDeleteTemplate,
 }: {
   nodeTypes: string[];
   edgeTypes: string[];
@@ -1034,15 +1549,31 @@ function GraphFilters({
   showLayouts: boolean;
   editableGraph: boolean;
   nodeOptions: Array<{ id: string; label: string }>;
+  groups: GraphGroupRecord[];
+  templates: GraphTemplateRecord[];
+  selectedNodeCount: number;
+  selectedGroupIds: string[];
   onCreateCopy: () => void;
   onAddNode: (label: string, nodeType: string) => void;
   onAddEdge: (source: string, target: string, edgeType: string) => void;
+  onToggleGroupSelection: (groupId: string) => void;
+  onCreateGroup: (title: string) => void;
+  onToggleGroup: (groupId: string) => void;
+  onDeleteGroup: (groupId: string) => void;
+  onSetAllGroupsCollapsed: (collapsed: boolean) => void;
+  onCollapseDescendants: () => void;
+  canCollapseDescendants: boolean;
+  onSaveTemplate: (name: string, scope: 'selection' | 'graph') => void;
+  onApplyTemplate: (templateId: string) => void;
+  onDeleteTemplate: (templateId: string) => void;
 }) {
   const [nodeLabel, setNodeLabel] = useState('Новый узел');
   const [nodeType, setNodeType] = useState('process');
   const [edgeSource, setEdgeSource] = useState('');
   const [edgeTarget, setEdgeTarget] = useState('');
   const [newEdgeType, setNewEdgeType] = useState('follow');
+  const [groupTitle, setGroupTitle] = useState('Новая группа');
+  const [templateName, setTemplateName] = useState('Новый шаблон');
   useEffect(() => {
     if (!nodeOptions.some((node) => node.id === edgeSource)) {
       setEdgeSource(nodeOptions[0]?.id || '');
@@ -1081,6 +1612,11 @@ function GraphFilters({
               checked={!hiddenEdgeTypes.includes(type)}
               onChange={() => onToggleEdgeType(type)}
             />
+            <span
+              className="edge-type-swatch"
+              style={{ background: String(edgeTypeStyle(type).stroke) }}
+              aria-hidden="true"
+            />
             {type}
           </label>
         ))}
@@ -1089,6 +1625,9 @@ function GraphFilters({
         <section className="filter-section">
           <h3>Раскладка</h3>
           <div className="layout-actions">
+            <button className="layout-primary" type="button" onClick={() => onApplyLayout('overview')}>
+              Упорядочить граф
+            </button>
             <button type="button" onClick={() => onApplyLayout('follow')}>
               Follow слева направо
             </button>
@@ -1101,6 +1640,111 @@ function GraphFilters({
           </div>
         </section>
       ) : null}
+      <section className="filter-section workspace-section">
+        <h3>Группы</h3>
+        <input
+          value={groupTitle}
+          aria-label="Название группы"
+          onChange={(event) => setGroupTitle(event.target.value)}
+        />
+        <button
+          type="button"
+          disabled={selectedNodeCount + selectedGroupIds.length < 2}
+          onClick={() => onCreateGroup(groupTitle)}
+        >
+          Сгруппировать выбранное ({selectedNodeCount + selectedGroupIds.length})
+        </button>
+        <button
+          type="button"
+          disabled={!canCollapseDescendants}
+          onClick={onCollapseDescendants}
+        >
+          Свернуть дочерний граф
+        </button>
+        {groups.length > 0 ? (
+          <>
+            <div className="compact-actions">
+              <button type="button" onClick={() => onSetAllGroupsCollapsed(true)}>
+                Свернуть все
+              </button>
+              <button type="button" onClick={() => onSetAllGroupsCollapsed(false)}>
+                Развернуть все
+              </button>
+            </div>
+            <div className="workspace-list">
+              {groups.map((group) => (
+                <div className="workspace-list-item" key={group.group_id}>
+                  <label>
+                    <input
+                      type="checkbox"
+                      checked={selectedGroupIds.includes(group.group_id)}
+                      onChange={() => onToggleGroupSelection(group.group_id)}
+                    />
+                    <span>
+                      <strong>{group.title}</strong>
+                      <small>
+                        {group.node_ids.length} узл. / {group.child_group_ids.length} гр.
+                      </small>
+                    </span>
+                  </label>
+                  <div className="workspace-item-actions">
+                    <button type="button" onClick={() => onToggleGroup(group.group_id)}>
+                      {group.collapsed ? 'Развернуть' : 'Свернуть'}
+                    </button>
+                    <button type="button" onClick={() => onDeleteGroup(group.group_id)}>
+                      Удалить
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </>
+        ) : null}
+      </section>
+      <section className="filter-section workspace-section">
+        <h3>Шаблоны</h3>
+        <input
+          value={templateName}
+          aria-label="Название шаблона"
+          onChange={(event) => setTemplateName(event.target.value)}
+        />
+        <div className="compact-actions">
+          <button
+            type="button"
+            disabled={selectedNodeCount === 0}
+            onClick={() => onSaveTemplate(templateName, 'selection')}
+          >
+            Из выбранного
+          </button>
+          <button type="button" onClick={() => onSaveTemplate(templateName, 'graph')}>
+            Из графа
+          </button>
+        </div>
+        {templates.length > 0 ? (
+          <div className="workspace-list">
+            {templates.map((template) => (
+              <div className="workspace-list-item" key={template.template_id}>
+                <div className="template-heading">
+                  <strong>{template.name}</strong>
+                  <small>{notationLabel(template.notation as Notation)}</small>
+                </div>
+                <div className="workspace-item-actions">
+                  <button
+                    type="button"
+                    disabled={!editableGraph}
+                    onClick={() => onApplyTemplate(template.template_id)}
+                  >
+                    Добавить
+                  </button>
+                  <button type="button" onClick={() => onDeleteTemplate(template.template_id)}>
+                    Удалить
+                  </button>
+                </div>
+              </div>
+            ))}
+          </div>
+        ) : null}
+      </section>
       <section className="filter-section">
         <h3>Редактирование структуры</h3>
         <button type="button" onClick={onCreateCopy}>
@@ -1272,14 +1916,14 @@ function NodeEditor({
         </select>
       </label>
       <label>
-        <FieldHeader title="Image URL" onReset={() => onResetField(node.id, 'imageUrl')} />
+        <FieldHeader title="URL изображения" onReset={() => onResetField(node.id, 'imageUrl')} />
         <DraftInput
           value={node.data.imageUrl}
           onCommit={(imageUrl) => onUpdate(node.id, { imageUrl })}
         />
       </label>
       <label>
-        Image file
+        Файл изображения
         <input
           type="file"
           accept="image/png,image/jpeg,image/webp,image/gif"
@@ -1598,41 +2242,100 @@ function toReactFlow(payload: GraphPayload | null): {
     });
   }
 
-  return {
-    nodes: graphNodes,
-    edges: payload.edges.map((edge) => {
+  const graphEdges: Edge<EditableEdgeData>[] = payload.edges.map((edge) => {
       const base = edgeBase(edge);
+      const style = edgeStyle(edge);
       return {
         id: edge.id,
         source: edge.source,
         target: edge.target,
         label: edge.label,
-        type: 'straight',
+        type: 'readable',
         animated: isAnimatedEdge(edge.type),
         data: {
           label: edge.label,
           edgeType: edge.type,
+          showLabel: edgeLabelVisible(edge),
           properties: propertiesFromUnknown(edge.data.properties),
           annotationRevision: numberField(edge.data.annotation_revision),
           base,
           raw: edge.data,
         },
-        style: edgeStyle(edge),
-        sourceHandle: sourceHandle(edge),
-        targetHandle: targetHandle(edge),
+        style,
         markerEnd: {
           type: MarkerType.ArrowClosed,
-          color: String(edge.style.stroke || '#475569'),
-          width: 22,
-          height: 22,
+          color: String(style.stroke || '#64748b'),
+          width: 16,
+          height: 16,
         },
-        labelBgPadding: [8, 4],
-        labelBgBorderRadius: 4,
-        labelBgStyle: { fill: '#ffffff', fillOpacity: 0.92 },
-        labelStyle: { fill: '#334155', fontSize: 12, fontWeight: 600 },
       };
-    }),
+    });
+  return {
+    nodes: graphNodes,
+    edges: routeFlowEdges(graphEdges, graphNodes),
   };
+}
+
+function groupProjectionNode(group: GroupProjection): Node<NotationNodeData> {
+  const position3d = {
+    x: group.position.x / 3,
+    y: -group.position.y / 3,
+    z: 0,
+  };
+  const base: BaseNodeState = {
+    label: group.title,
+    shape: 'component',
+    imageUrl: '',
+    createdAt: '',
+    position: group.position,
+    position3d,
+    properties: [],
+  };
+  return {
+    id: groupNodeId(group.groupId),
+    type: 'graphGroup',
+    position: group.position,
+    data: {
+      label: group.title,
+      shape: 'component',
+      nodeType: 'group',
+      imageUrl: '',
+      createdAt: '',
+      position3d,
+      properties: [],
+      annotationRevision: 0,
+      base,
+      style: {},
+      raw: {
+        groupId: group.groupId,
+        collapsed: group.collapsed,
+        memberCount: group.memberIds.length,
+      },
+    },
+    draggable: false,
+    selectable: group.collapsed,
+    focusable: group.collapsed,
+    zIndex: group.collapsed ? 4 : 0,
+    style: {
+      width: group.width,
+      height: group.height,
+      pointerEvents: group.collapsed ? 'auto' : 'none',
+    },
+  };
+}
+
+function GraphGroupNode({ data }: { data: NotationNodeData }) {
+  const collapsed = Boolean(data.raw.collapsed);
+  const memberCount = numberField(data.raw.memberCount);
+  return (
+    <div className={`graph-group-node${collapsed ? ' is-collapsed' : ''}`}>
+      {collapsed ? <NodeHandles /> : null}
+      <div className="graph-group-title">
+        <strong>{data.label}</strong>
+        <span>{memberCount} узл.</span>
+      </div>
+    </div>
+  );
 }
 
 function NotationNode({ data }: { data: NotationNodeData }) {
@@ -1643,22 +2346,11 @@ function NotationNode({ data }: { data: NotationNodeData }) {
   return (
     <div className={className} style={nodeInlineStyle(data.style)}>
       <NodeHandles />
-      {data.shape === 'actor' ? <ActorNode label={data.label} /> : null}
+      {data.shape === 'actor' ? <ActorNode label={data.label} imageUrl={data.imageUrl} /> : null}
       {data.shape !== 'actor' ? (
         <div className="node-content">
-          {data.imageUrl ? (
-            <img
-              className="node-image"
-              src={data.imageUrl}
-              alt=""
-              referrerPolicy="no-referrer"
-              onError={(event) => {
-                event.currentTarget.hidden = true;
-              }}
-            />
-          ) : null}
+          <NodeImage imageUrl={data.imageUrl} />
           <div className="node-label">{data.label}</div>
-          {data.createdAt ? <div className="node-time">{data.createdAt}</div> : null}
           {data.shape !== 'class' ? <div className="node-meta">{meta}</div> : null}
           {data.shape === 'class' ? <ClassSections raw={data.raw} /> : null}
           {data.properties.length > 0 ? <NodeProperties properties={data.properties} /> : null}
@@ -1674,14 +2366,26 @@ function NodeHandles() {
     <>
       <Handle
         id="left-target"
-        className="node-handle node-handle-target"
+        className="node-handle node-handle-left"
         type="target"
         position={Position.Left}
       />
       <Handle
-        id="right-source"
-        className="node-handle node-handle-source"
+        id="left-source"
+        className="node-handle node-handle-left"
         type="source"
+        position={Position.Left}
+      />
+      <Handle
+        id="right-source"
+        className="node-handle node-handle-right"
+        type="source"
+        position={Position.Right}
+      />
+      <Handle
+        id="right-target"
+        className="node-handle node-handle-right"
+        type="target"
         position={Position.Right}
       />
       <Handle
@@ -1712,15 +2416,40 @@ function NodeHandles() {
   );
 }
 
-function ActorNode({ label }: { label: string }) {
+function ActorNode({ label, imageUrl }: { label: string; imageUrl: string }) {
   return (
     <div className="actor-figure">
-      <span className="actor-head" />
+      {imageUrl ? (
+        <NodeImage imageUrl={imageUrl} className="actor-node-image" />
+      ) : (
+        <span className="actor-head" />
+      )}
       <span className="actor-body" />
       <span className="actor-arms" />
       <span className="actor-legs" />
       <div className="node-label">{label}</div>
     </div>
+  );
+}
+
+function NodeImage({ imageUrl, className = 'node-image' }: { imageUrl: string; className?: string }) {
+  if (!imageUrl) {
+    return null;
+  }
+  return (
+    <img
+      key={imageUrl}
+      className={className}
+      src={imageUrl}
+      alt=""
+      referrerPolicy="no-referrer"
+      onLoad={(event) => {
+        event.currentTarget.hidden = false;
+      }}
+      onError={(event) => {
+        event.currentTarget.hidden = true;
+      }}
+    />
   );
 }
 
@@ -1786,36 +2515,12 @@ function edgeStyle(edge: GraphApiEdge) {
   return {
     ...edge.style,
     stroke,
-    strokeWidth: Math.max(width + 1.4, 3.2),
+    strokeWidth: Math.max(width, 2.1),
   };
 }
 
-function sourceHandle(edge: GraphApiEdge): string {
-  return sourceHandleForType(edge.type);
-}
-
-function sourceHandleForType(edgeType: string): string {
-  if (edgeType === 'saved_to' || edgeType === 'exported_to') {
-    return 'bottom-source';
-  }
-  if (edgeType === 'about') {
-    return 'bottom-source';
-  }
-  return 'right-source';
-}
-
-function targetHandle(edge: GraphApiEdge): string {
-  return targetHandleForType(edge.type);
-}
-
-function targetHandleForType(edgeType: string): string {
-  if (edgeType === 'score') {
-    return 'bottom-target';
-  }
-  if (edgeType === 'about' || edgeType === 'saved_to' || edgeType === 'exported_to') {
-    return 'top-target';
-  }
-  return 'left-target';
+function edgeLabelVisible(edge: GraphApiEdge): boolean {
+  return !new Set(['found', 'from_source', 'source']).has(edge.type);
 }
 
 function SystemBoundary({ data }: { data: SystemBoundaryData }) {
@@ -1879,7 +2584,7 @@ function nodeAnnotationPayload(node: Node<NotationNodeData>): Record<string, unk
   };
 }
 
-function customNodePayload(node: Node<NotationNodeData>): Record<string, unknown> {
+function customNodePayload(node: Node<NotationNodeData>): GraphTemplateNode {
   return {
     id: node.id,
     label: node.data.label,
@@ -1894,7 +2599,7 @@ function customNodePayload(node: Node<NotationNodeData>): Record<string, unknown
   };
 }
 
-function customEdgePayload(edge: Edge<EditableEdgeData>): Record<string, unknown> {
+function customEdgePayload(edge: Edge<EditableEdgeData>): GraphTemplateEdge {
   const data = edgeData(edge);
   return {
     id: edge.id,
@@ -2005,19 +2710,99 @@ function withEdgePresentation(
   const style = edgeTypeStyle(data.edgeType);
   return {
     ...edge,
+    type: 'readable',
     label: data.label,
     animated: isAnimatedEdge(data.edgeType),
     data,
     style,
-    sourceHandle: sourceHandleForType(data.edgeType),
-    targetHandle: targetHandleForType(data.edgeType),
     markerEnd: {
       type: MarkerType.ArrowClosed,
       color: String(style.stroke),
-      width: 22,
-      height: 22,
+      width: 16,
+      height: 16,
     },
   };
+}
+
+function routeFlowEdges(
+  edges: Edge<EditableEdgeData>[],
+  nodes: Node<NotationNodeData>[],
+  orientation?: 'horizontal' | 'vertical',
+): Edge<EditableEdgeData>[] {
+  const positions = new Map(nodes.map((node) => [node.id, node.position]));
+  const outgoing = groupEdges(edges, (edge) => edge.source);
+  const incoming = groupEdges(edges, (edge) => edge.target);
+  const parallel = groupEdges(edges, (edge) => `${edge.source}\u0000${edge.target}`);
+
+  return edges.map((edge) => {
+    const source = positions.get(edge.source) || { x: 0, y: 0 };
+    const target = positions.get(edge.target) || { x: 0, y: 0 };
+    const routeOrientation = orientation || inferOrientation(source, target);
+    const sourceEdges = sortConnectedEdges(outgoing.get(edge.source) || [], positions, 'target', routeOrientation);
+    const targetEdges = sortConnectedEdges(incoming.get(edge.target) || [], positions, 'source', routeOrientation);
+    const pair = parallel.get(`${edge.source}\u0000${edge.target}`) || [edge];
+    const handles = routeHandles(source, target, routeOrientation);
+    return {
+      ...edge,
+      type: 'readable',
+      sourceHandle: handles.source,
+      targetHandle: handles.target,
+      data: {
+        ...edgeData(edge),
+        parallelIndex: Math.max(0, pair.findIndex((item) => item.id === edge.id)),
+        parallelTotal: pair.length,
+        sourceOrder: Math.max(0, sourceEdges.findIndex((item) => item.id === edge.id)),
+        targetOrder: Math.max(0, targetEdges.findIndex((item) => item.id === edge.id)),
+      },
+    };
+  });
+}
+
+function groupEdges(
+  edges: Edge<EditableEdgeData>[],
+  key: (edge: Edge<EditableEdgeData>) => string,
+): Map<string, Edge<EditableEdgeData>[]> {
+  const groups = new Map<string, Edge<EditableEdgeData>[]>();
+  edges.forEach((edge) => groups.set(key(edge), [...(groups.get(key(edge)) || []), edge]));
+  return groups;
+}
+
+function sortConnectedEdges(
+  edges: Edge<EditableEdgeData>[],
+  positions: Map<string, { x: number; y: number }>,
+  endpoint: 'source' | 'target',
+  orientation: 'horizontal' | 'vertical',
+): Edge<EditableEdgeData>[] {
+  const axis = orientation === 'horizontal' ? 'y' : 'x';
+  return [...edges].sort((left, right) => {
+    const leftPosition = positions.get(left[endpoint]) || { x: 0, y: 0 };
+    const rightPosition = positions.get(right[endpoint]) || { x: 0, y: 0 };
+    return leftPosition[axis] - rightPosition[axis] || left.id.localeCompare(right.id);
+  });
+}
+
+function inferOrientation(
+  source: { x: number; y: number },
+  target: { x: number; y: number },
+): 'horizontal' | 'vertical' {
+  return Math.abs(target.x - source.x) >= Math.abs(target.y - source.y)
+    ? 'horizontal'
+    : 'vertical';
+}
+
+function routeHandles(
+  source: { x: number; y: number },
+  target: { x: number; y: number },
+  orientation: 'horizontal' | 'vertical',
+): { source: string; target: string } {
+  if (orientation === 'horizontal') {
+    return target.x >= source.x
+      ? { source: 'right-source', target: 'left-target' }
+      : { source: 'left-source', target: 'right-target' };
+  }
+  return target.y >= source.y
+    ? { source: 'bottom-source', target: 'top-target' }
+    : { source: 'top-source', target: 'bottom-target' };
 }
 
 function arrangeNodes(
@@ -2048,6 +2833,67 @@ function arrangeNodes(
       position: positions.get(node.id) || node.position,
     })),
   ];
+}
+
+function templateDefinition(
+  nodes: Node<NotationNodeData>[],
+  edges: Edge<EditableEdgeData>[],
+  groups: GraphGroupRecord[],
+  includedNodeIds: Set<string>,
+): GraphTemplateDefinition {
+  const selectedNodes = nodes.filter((node) => includedNodeIds.has(node.id));
+  const minX = Math.min(...selectedNodes.map((node) => node.position.x));
+  const minY = Math.min(...selectedNodes.map((node) => node.position.y));
+  const templateNodes = selectedNodes.map((node) => {
+    const result = customNodePayload(node);
+    return { ...result, x: result.x - minX, y: result.y - minY };
+  });
+  const templateEdges = edges
+    .filter((edge) => includedNodeIds.has(edge.source) && includedNodeIds.has(edge.target))
+    .map(customEdgePayload);
+  const groupsById = new Map(groups.map((group) => [group.group_id, group]));
+  const includedGroupIds = new Set(
+    groups
+      .filter((group) => {
+        const memberIds = recursiveGroupNodeIds(group.group_id, groupsById);
+        return memberIds.size > 0 && [...memberIds].every((nodeId) => includedNodeIds.has(nodeId));
+      })
+      .map((group) => group.group_id),
+  );
+  const templateGroups = groups
+    .filter((group) => includedGroupIds.has(group.group_id))
+    .map((group) => ({
+      group_id: group.group_id,
+      title: group.title,
+      node_ids: group.node_ids,
+      child_group_ids: group.child_group_ids.filter((id) => includedGroupIds.has(id)),
+      collapsed: group.collapsed,
+    }));
+  return { nodes: templateNodes, edges: templateEdges, groups: templateGroups };
+}
+
+function childFirstGroups(groups: GraphTemplateGroup[]): GraphTemplateGroup[] {
+  const groupsById = new Map(groups.map((group) => [group.group_id, group]));
+  const result: GraphTemplateGroup[] = [];
+  const visited = new Set<string>();
+  const visit = (groupId: string) => {
+    if (visited.has(groupId)) {
+      return;
+    }
+    visited.add(groupId);
+    const group = groupsById.get(groupId);
+    if (!group) {
+      return;
+    }
+    group.child_group_ids.forEach(visit);
+    result.push(group);
+  };
+  groups.forEach((group) => visit(group.group_id));
+  return result;
+}
+
+function uniqueId(prefix: string): string {
+  return `${prefix}-${crypto.randomUUID?.() || Date.now()}`;
 }
 
 function stringField(value: unknown): string {
