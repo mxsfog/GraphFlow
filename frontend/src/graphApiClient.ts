@@ -73,6 +73,41 @@ export type GraphTemplateRecord = {
   definition?: GraphTemplateDefinition;
 };
 
+export type GraphViewState = {
+  notation: string;
+  view_mode: '2d' | '3d';
+  metric_mode: 'planned' | 'actual';
+  inverted_background: boolean;
+  hidden_node_types: string[];
+  hidden_edge_types: string[];
+  hidden_levels: number[];
+  attribute_filters: {
+    status: string;
+    region: string;
+    organization: string;
+    year: string;
+  };
+  collapsed_branches: string[];
+  viewport: { x: number; y: number; zoom: number } | Record<string, never>;
+};
+
+export type GraphViewRecord = {
+  graph_id: string;
+  view_id: string;
+  name: string;
+  state: GraphViewState;
+  revision: number;
+  created_at: string;
+  updated_at: string;
+};
+
+export type NodeOccurrence = {
+  key: string;
+  label: string;
+  map_count: number;
+  map_ids: string[];
+};
+
 export class AuthError extends Error {
   constructor() {
     super('Graph API authentication failed');
@@ -195,6 +230,47 @@ export function deleteGraphTemplate(
     `${apiBaseUrl}/api/graph/templates/${encodeURIComponent(templateId)}`,
     authToken,
   );
+}
+
+export function loadGraphViews(
+  apiBaseUrl: string,
+  authToken: string,
+  graphId: string,
+  signal: AbortSignal,
+): Promise<{ views: GraphViewRecord[] }> {
+  const query = new URLSearchParams({ graph_id: graphId });
+  return loadJson(`${apiBaseUrl}/api/graph/views?${query}`, signal, authToken);
+}
+
+export function saveGraphView(
+  apiBaseUrl: string,
+  authToken: string,
+  payload: Pick<GraphViewRecord, 'graph_id' | 'view_id' | 'name' | 'state' | 'revision'>,
+): Promise<GraphViewRecord & { saved: boolean }> {
+  return postJson(`${apiBaseUrl}/api/graph/views`, authToken, payload);
+}
+
+export function deleteGraphView(
+  apiBaseUrl: string,
+  authToken: string,
+  graphId: string,
+  viewId: string,
+): Promise<{ deleted: boolean; view_id: string }> {
+  const query = new URLSearchParams({ graph_id: graphId });
+  return deleteJson(
+    `${apiBaseUrl}/api/graph/views/${encodeURIComponent(viewId)}?${query}`,
+    authToken,
+  );
+}
+
+export function loadNodeOccurrences(
+  apiBaseUrl: string,
+  authToken: string,
+  notation: string,
+  signal: AbortSignal,
+): Promise<{ occurrences: NodeOccurrence[] }> {
+  const query = new URLSearchParams({ notation });
+  return loadJson(`${apiBaseUrl}/api/graph/node-occurrences?${query}`, signal, authToken);
 }
 
 function postJson<T>(url: string, authToken: string, payload: object): Promise<T> {

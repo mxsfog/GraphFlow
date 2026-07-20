@@ -23,8 +23,11 @@ from electromotiv_pipeline.graph_api import (
     ApiAuth,
     empty_graph,
     is_authorized,
+    list_node_occurrences,
     merge_edge_style,
     merge_style,
+    normalize_graph_view_state,
+    normalize_occurrence_label,
     normalize_template_definition,
     notation_shape,
     runtime_edges,
@@ -403,6 +406,49 @@ def test_graph_template_normalization_validates_references() -> None:
                 "edges": [{"id": "broken", "source": "a", "target": "missing"}],
             }
         )
+
+
+def test_graph_view_state_normalization() -> None:
+    state = normalize_graph_view_state(
+        {
+            "notation": "flow",
+            "view_mode": "2d",
+            "metric_mode": "actual",
+            "inverted_background": True,
+            "hidden_node_types": ["task"],
+            "hidden_edge_types": ["todo"],
+            "hidden_levels": [2, 1, 2],
+            "attribute_filters": {"status": "active"},
+            "collapsed_branches": ["root"],
+            "viewport": {"x": 10, "y": -4, "zoom": 1.2},
+        }
+    )
+
+    assert state["hidden_levels"] == [1, 2]
+    assert state["attribute_filters"]["status"] == "active"
+    assert state["viewport"]["zoom"] == 1.2
+    with pytest.raises(ValueError, match="view_mode"):
+        normalize_graph_view_state({"view_mode": "vr"})
+
+
+def test_node_occurrences_are_counted_by_distinct_maps() -> None:
+    class FakeClient:
+        def command(self, sql: str) -> dict[str, object]:
+            if "FROM GraphNode" in sql:
+                return {
+                    "result": [
+                        {"graph_id": "a", "node_id": "1", "label": "Общая цель"},
+                        {"graph_id": "a", "node_id": "2", "label": "Общая цель"},
+                        {"graph_id": "b", "node_id": "1", "label": " общая  ЦЕЛЬ "},
+                    ]
+                }
+            return {"result": []}
+
+    occurrences = list_node_occurrences(FakeClient(), notation="flow")  # type: ignore[arg-type]
+
+    assert normalize_occurrence_label(" Общая  ЦЕЛЬ ") == "общая цель"
+    assert occurrences[0]["map_count"] == 2
+    assert occurrences[0]["map_ids"] == ["graph:a", "graph:b"]
 
 
 def test_parse_document_graph_accepts_markdown_fence() -> None:

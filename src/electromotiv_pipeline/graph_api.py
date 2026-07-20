@@ -7,6 +7,7 @@ import json
 import logging
 import math
 import threading
+import unicodedata
 import urllib.parse
 from dataclasses import dataclass, replace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -103,6 +104,9 @@ MAX_GRAPH_GROUPS = 100
 MAX_GROUP_NODES = 200
 MAX_GROUP_CHILDREN = 50
 MAX_GRAPH_TEMPLATES = 50
+MAX_GRAPH_VIEWS = 50
+MAX_OCCURRENCE_ROWS = 10_000
+MAX_VIEW_STATE_BYTES = 100_000
 LOGGER = logging.getLogger(__name__)
 ANNOTATION_LOCK = threading.RLock()
 WORKSPACE_LOCK = threading.RLock()
@@ -283,9 +287,14 @@ def route_get(client: OrientDBClient, raw_path: str) -> dict[str, object] | None
         return graph_api_schema()
     if parsed.path == "/api/search-runs":
         return {"runs": list_search_runs(client)}
+    if parsed.path == "/api/graph/node-occurrences":
+        return {"occurrences": list_node_occurrences(client, notation=notation)}
     if parsed.path == "/api/graph/groups":
         graph_id = first_query_value(query, "graph_id", "")
         return {"groups": list_graph_groups(client, graph_id=graph_id, notation=notation)}
+    if parsed.path == "/api/graph/views":
+        graph_id = first_query_value(query, "graph_id", "")
+        return {"views": list_graph_views(client, graph_id=graph_id)}
     if parsed.path == "/api/graph/templates":
         return {"templates": list_graph_templates(client)}
     if parsed.path.startswith("/api/graph/templates/"):
@@ -321,6 +330,8 @@ def route_post(
         return save_custom_graph(client, payload)
     if parsed.path == "/api/graph/groups":
         return save_graph_group(client, payload)
+    if parsed.path == "/api/graph/views":
+        return save_graph_view(client, payload)
     if parsed.path == "/api/graph/templates":
         return save_graph_template(client, payload)
     return None
@@ -340,6 +351,13 @@ def route_delete(client: OrientDBClient, raw_path: str) -> dict[str, object] | N
     if parsed.path.startswith("/api/graph/templates/"):
         template_id = urllib.parse.unquote(parsed.path.removeprefix("/api/graph/templates/"))
         return delete_graph_template(client, template_id=template_id)
+    if parsed.path.startswith("/api/graph/views/"):
+        view_id = urllib.parse.unquote(parsed.path.removeprefix("/api/graph/views/"))
+        return delete_graph_view(
+            client,
+            graph_id=first_query_value(query, "graph_id", ""),
+            view_id=view_id,
+        )
     return None
 
 
@@ -1182,6 +1200,161 @@ def delete_graph_template(
     return {"deleted": True, "template_id": template_id}
 
 
+def list_graph_views(
+    client: OrientDBClient,
+    *,
+    graph_id: str,
+) -> list[dict[str, object]]:
+    validate_graph_scope(graph_id, "flow")
+    rows = orient_rows(
+        client,
+        "SELECT FROM GraphView "
+        f"WHERE graph_id = '{sql_string(graph_id)}' "
+        f"ORDER BY updated_at DESC LIMIT {MAX_GRAPH_VIEWS}",
+    )
+    return [graph_view_from_row(row) for row in rows]
+
+
+def save_graph_view(
+    client: OrientDBClient,
+    request_payload: dict[str, object],
+) -> dict[str, object]:
+    graph_id = required_string(request_payload, "graph_id")
+    view_id = required_string(request_payload, "view_id")
+    name = required_string(request_payload, "name")
+    revision = int_or_default(request_payload.get("revision"), -1)
+    validate_graph_scope(graph_id, "flow")
+    validate_identifier(view_id, "view_id")
+    if len(name) > 200:
+        raise ValueError("Название представления превышает 200 символов.")
+    if revision < 0:
+        raise ValueError("revision должен быть неотрицательным целым числом.")
+    state = normalize_graph_view_state(request_payload.get("state"))
+
+    with WORKSPACE_LOCK:
+        rows = orient_rows(
+            client,
+            "SELECT FROM GraphView "
+            f"WHERE graph_id = '{sql_string(graph_id)}' "
+            f"AND view_id = '{sql_string(view_id)}' LIMIT 1",
+        )
+        current_revision = int_or_default(rows[0].get("revision"), 0) if rows else 0
+        if revision != current_revision:
+            raise ConflictError(
+                f"Конфликт версии представления {view_id}: ожидалась {revision}, "
+                f"текущая {current_revision}."
+            )
+        if not rows and len(list_graph_views(client, graph_id=graph_id)) >= MAX_GRAPH_VIEWS:
+            raise ValueError(f"Для карты разрешено не более {MAX_GRAPH_VIEWS} представлений.")
+        stored_payload = {
+            "graph_id": graph_id,
+            "view_id": view_id,
+            "name": name,
+            "state_json": compact_json(state),
+            "revision": current_revision + 1,
+            "updated_at": now_orient(),
+        }
+        if rows and rows[0].get("@rid"):
+            client.command(
+                f"UPDATE {rows[0]['@rid']} MERGE "
+                f"{json.dumps(stored_payload, ensure_ascii=False)} RETURN AFTER"
+            )
+        else:
+            client.create_vertex("GraphView", {**stored_payload, "created_at": now_orient()})
+    saved = next(
+        view for view in list_graph_views(client, graph_id=graph_id) if view["view_id"] == view_id
+    )
+    return {"saved": True, **saved}
+
+
+def delete_graph_view(
+    client: OrientDBClient,
+    *,
+    graph_id: str,
+    view_id: str,
+) -> dict[str, object]:
+    validate_graph_scope(graph_id, "flow")
+    validate_identifier(view_id, "view_id")
+    with WORKSPACE_LOCK:
+        rows = orient_rows(
+            client,
+            "SELECT @rid AS rid FROM GraphView "
+            f"WHERE graph_id = '{sql_string(graph_id)}' "
+            f"AND view_id = '{sql_string(view_id)}' LIMIT 1",
+        )
+        if not rows:
+            return {"deleted": False, "view_id": view_id}
+        client.command(f"DELETE VERTEX {rows[0]['rid']}")
+    return {"deleted": True, "view_id": view_id}
+
+
+def list_node_occurrences(
+    client: OrientDBClient,
+    *,
+    notation: str,
+) -> list[dict[str, object]]:
+    if notation not in SUPPORTED_NOTATIONS:
+        raise ValueError(f"Неподдерживаемая нотация: {notation}")
+    custom_rows = orient_rows(
+        client,
+        "SELECT graph_id, node_id, label FROM GraphNode "
+        f"LIMIT {MAX_OCCURRENCE_ROWS}",
+    )
+    annotation_rows = orient_rows(
+        client,
+        "SELECT graph_id, element_id, payload_json FROM GraphAnnotation "
+        "WHERE element_kind = 'node' "
+        f"AND notation = '{sql_string(notation)}' LIMIT {MAX_OCCURRENCE_ROWS}",
+    )
+    annotated_labels: dict[tuple[str, str], str] = {}
+    for row in annotation_rows:
+        payload = json_object(row.get("payload_json"))
+        label = str(payload.get("label") or "").strip()
+        if label:
+            key = (str(row.get("graph_id") or ""), str(row.get("element_id") or ""))
+            annotated_labels[key] = label
+
+    entries: list[tuple[str, str]] = []
+    for row in custom_rows:
+        graph_id = f"graph:{row.get('graph_id', '')}"
+        node_id = str(row.get("node_id") or "")
+        label = annotated_labels.get((graph_id, node_id), str(row.get("label") or ""))
+        if graph_id != "graph:" and label.strip():
+            entries.append((graph_id, label.strip()))
+    search_rows = orient_rows(
+        client,
+        "SELECT run_id, title FROM SearchResult "
+        f"LIMIT {MAX_OCCURRENCE_ROWS}",
+    )
+    entries.extend(
+        (f"run:{row.get('run_id', '')}", str(row.get("title") or "").strip())
+        for row in search_rows
+        if row.get("run_id") and str(row.get("title") or "").strip()
+    )
+
+    maps_by_key: dict[str, set[str]] = {}
+    labels_by_key: dict[str, str] = {}
+    for graph_id, label in entries:
+        key = normalize_occurrence_label(label)
+        if not key:
+            continue
+        maps_by_key.setdefault(key, set()).add(graph_id)
+        labels_by_key.setdefault(key, label)
+    return [
+        {
+            "key": key,
+            "label": labels_by_key[key],
+            "map_count": len(graph_ids),
+            "map_ids": sorted(graph_ids),
+        }
+        for key, graph_ids in sorted(
+            maps_by_key.items(),
+            key=lambda item: (-len(item[1]), labels_by_key[item[0]].casefold()),
+        )
+        if len(graph_ids) > 1
+    ]
+
+
 def custom_graph_payload(
     *,
     client: OrientDBClient,
@@ -1472,6 +1645,107 @@ def graph_template_from_row(
     return result
 
 
+def graph_view_from_row(row: dict[str, object]) -> dict[str, object]:
+    return {
+        "graph_id": str(row.get("graph_id") or ""),
+        "view_id": str(row.get("view_id") or ""),
+        "name": str(row.get("name") or "Представление"),
+        "state": json_object(row.get("state_json")),
+        "revision": int_or_default(row.get("revision"), 0),
+        "created_at": str(row.get("created_at") or ""),
+        "updated_at": str(row.get("updated_at") or ""),
+    }
+
+
+def normalize_graph_view_state(value: object) -> dict[str, object]:
+    state = json_object(value)
+    allowed = {
+        "notation",
+        "view_mode",
+        "metric_mode",
+        "inverted_background",
+        "hidden_node_types",
+        "hidden_edge_types",
+        "hidden_levels",
+        "attribute_filters",
+        "collapsed_branches",
+        "viewport",
+    }
+    unknown = set(state) - allowed
+    if unknown:
+        raise ValueError("Неизвестные поля представления: " + ", ".join(sorted(unknown)))
+    notation = str(state.get("notation") or "flow")
+    view_mode = str(state.get("view_mode") or "2d")
+    metric_mode = str(state.get("metric_mode") or "planned")
+    if notation not in SUPPORTED_NOTATIONS:
+        raise ValueError(f"Неподдерживаемая нотация: {notation}")
+    if view_mode not in {"2d", "3d"}:
+        raise ValueError("view_mode должен быть равен 2d или 3d.")
+    if metric_mode not in {"planned", "actual"}:
+        raise ValueError("metric_mode должен быть равен planned или actual.")
+    inverted_background = state.get("inverted_background", False)
+    if not isinstance(inverted_background, bool):
+        raise ValueError("inverted_background должен быть логическим значением.")
+    hidden_levels = state.get("hidden_levels", [])
+    if (
+        not isinstance(hidden_levels, list)
+        or len(hidden_levels) > 100
+        or any(
+            not isinstance(level, int) or isinstance(level, bool) or level < 0
+            for level in hidden_levels
+        )
+    ):
+        raise ValueError("hidden_levels должен содержать неотрицательные целые числа.")
+    filters = json_object(state.get("attribute_filters"))
+    if set(filters) - {"status", "region", "organization", "year"}:
+        raise ValueError("attribute_filters содержит неизвестные поля.")
+    normalized_filters = {
+        field: str(filters.get(field) or "").strip()[:200]
+        for field in ("status", "region", "organization", "year")
+    }
+    viewport = json_object(state.get("viewport"))
+    normalized_viewport: dict[str, float] = {}
+    if viewport:
+        for field in ("x", "y", "zoom"):
+            raw = viewport.get(field)
+            if not isinstance(raw, (int, float)) or isinstance(raw, bool) or not math.isfinite(raw):
+                raise ValueError("viewport должен содержать конечные x, y и zoom.")
+            normalized_viewport[field] = float(raw)
+        if not 0.05 <= normalized_viewport["zoom"] <= 10:
+            raise ValueError("viewport.zoom находится вне допустимого диапазона.")
+    normalized = {
+        "notation": notation,
+        "view_mode": view_mode,
+        "metric_mode": metric_mode,
+        "inverted_background": inverted_background,
+        "hidden_node_types": normalize_identifier_list(
+            state.get("hidden_node_types", []),
+            field_name="hidden_node_types",
+            limit=100,
+        ),
+        "hidden_edge_types": normalize_identifier_list(
+            state.get("hidden_edge_types", []),
+            field_name="hidden_edge_types",
+            limit=100,
+        ),
+        "hidden_levels": sorted(set(hidden_levels)),
+        "attribute_filters": normalized_filters,
+        "collapsed_branches": normalize_identifier_list(
+            state.get("collapsed_branches", []),
+            field_name="collapsed_branches",
+            limit=200,
+        ),
+        "viewport": normalized_viewport,
+    }
+    if len(compact_json(normalized).encode("utf-8")) > MAX_VIEW_STATE_BYTES:
+        raise ValueError("Состояние представления превышает допустимый размер.")
+    return normalized
+
+
+def normalize_occurrence_label(value: str) -> str:
+    return " ".join(unicodedata.normalize("NFKC", value).casefold().split())
+
+
 def compact_json(value: object) -> str:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
 
@@ -1733,6 +2007,9 @@ def graph_api_schema() -> dict[str, object]:
             "POST /api/graphs",
             "GET|POST /api/graph/groups",
             "DELETE /api/graph/groups/{group_id}",
+            "GET /api/graph/node-occurrences",
+            "GET|POST /api/graph/views",
+            "DELETE /api/graph/views/{view_id}",
             "GET|POST /api/graph/templates",
             "GET|DELETE /api/graph/templates/{template_id}",
         ],

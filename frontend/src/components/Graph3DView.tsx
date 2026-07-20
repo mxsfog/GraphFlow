@@ -28,6 +28,8 @@ export type Graph3DNode = Position3D & {
   nodeType: string;
   shape: string;
   imageUrl: string;
+  sharedMapCount: number;
+  metric: string;
 };
 
 export type Graph3DLink = {
@@ -166,9 +168,16 @@ export default function Graph3DView({
         enableNodeDrag
         enableNavigationControls
         nodeThreeObject={(node) => createNodeObject(node, String(node.id) === selectedNodeId)}
-        nodeLabel={(node) => tooltip(node.label, node.nodeType)}
+        nodeLabel={(node) => tooltip(
+          node.label,
+          `${node.nodeType}${node.metric ? ` · ${node.metric}` : ''}`,
+        )}
         nodeVal={(node) => nodeSize(node.nodeType)}
-        nodeColor={(node) => nodeColor(node.nodeType, String(node.id) === selectedNodeId)}
+        nodeColor={(node) => nodeColor(
+          node.nodeType,
+          String(node.id) === selectedNodeId,
+          node.sharedMapCount > 1,
+        )}
         linkLabel={(link) => tooltip(link.label || link.edgeType, link.edgeType)}
         linkColor={(link) =>
           linkColor(link.edgeType, String(link.id) === selectedEdgeId, invertedBackground)
@@ -194,22 +203,17 @@ export default function Graph3DView({
           Весь граф
         </button>
       </div>
-      <div className="graph-3d-legend" aria-label="Легенда 3D-графа">
-        <span><i className="legend-process" />Процесс</span>
-        <span><i className="legend-news" />Данные</span>
-        <span><i className="legend-source" />Источник</span>
-        <span><i className="legend-storage" />Хранилище</span>
-      </div>
     </div>
   );
 }
 
 function createNodeObject(node: NodeObject<Graph3DNode>, selected: boolean): Group {
-  const color = nodeColor(node.nodeType, selected);
+  const shared = node.sharedMapCount > 1;
+  const color = nodeColor(node.nodeType, selected, shared);
   const material = new MeshStandardMaterial({
     color,
-    emissive: selected ? color : '#000000',
-    emissiveIntensity: selected ? 0.24 : 0,
+    emissive: selected || shared ? color : '#000000',
+    emissiveIntensity: selected ? 0.24 : shared ? 0.12 : 0,
     metalness: node.nodeType === 'storage' ? 0.5 : 0.12,
     roughness: 0.48,
   });
@@ -221,7 +225,11 @@ function createNodeObject(node: NodeObject<Graph3DNode>, selected: boolean): Gro
     image.position.set(0, size + 25, 0);
     group.add(image);
   }
-  const label = labelSprite(node.label, selected);
+  const label = labelSprite(
+    `${node.label}${node.metric ? ` · ${node.metric}` : ''}`,
+    selected,
+    shared,
+  );
   label.position.set(0, size + 8, 0);
   group.add(label);
   return group;
@@ -243,13 +251,17 @@ function nodeGeometry(shape: string, nodeType: string, size: number) {
   return new SphereGeometry(size, 22, 16);
 }
 
-function labelSprite(label: string, selected: boolean): Sprite {
+function labelSprite(label: string, selected: boolean, shared: boolean): Sprite {
   const canvas = document.createElement('canvas');
   const context = canvas.getContext('2d');
   canvas.width = 512;
   canvas.height = 96;
   if (context) {
-    context.fillStyle = selected ? 'rgba(250, 204, 21, 0.96)' : 'rgba(255, 255, 255, 0.92)';
+    context.fillStyle = selected
+      ? 'rgba(250, 204, 21, 0.96)'
+      : shared
+        ? 'rgba(251, 207, 232, 0.96)'
+        : 'rgba(255, 255, 255, 0.92)';
     context.fillRect(0, 0, canvas.width, canvas.height);
     context.fillStyle = '#111827';
     context.font = '600 28px Arial';
@@ -278,8 +290,11 @@ function imageSprite(imageUrl: string): Sprite {
   return sprite;
 }
 
-function nodeColor(nodeType: string, selected: boolean): string {
-  return selected ? '#facc15' : NODE_COLORS[nodeType] || '#60a5fa';
+function nodeColor(nodeType: string, selected: boolean, shared = false): string {
+  if (selected) {
+    return '#facc15';
+  }
+  return shared ? '#ec4899' : NODE_COLORS[nodeType] || '#60a5fa';
 }
 
 function linkColor(edgeType: string, selected: boolean, invertedBackground: boolean): string {

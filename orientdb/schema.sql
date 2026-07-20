@@ -143,3 +143,13 @@ CREATE PROPERTY GraphTemplate.revision INTEGER;
 CREATE PROPERTY GraphTemplate.created_at DATETIME;
 CREATE PROPERTY GraphTemplate.updated_at DATETIME;
 CREATE INDEX GraphTemplate.template_id UNIQUE;
+
+CREATE CLASS GraphView EXTENDS V;
+CREATE PROPERTY GraphView.graph_id STRING;
+CREATE PROPERTY GraphView.view_id STRING;
+CREATE PROPERTY GraphView.name STRING;
+CREATE PROPERTY GraphView.state_json STRING;
+CREATE PROPERTY GraphView.revision INTEGER;
+CREATE PROPERTY GraphView.created_at DATETIME;
+CREATE PROPERTY GraphView.updated_at DATETIME;
+CREATE INDEX GraphView.key ON GraphView (graph_id, view_id) UNIQUE;

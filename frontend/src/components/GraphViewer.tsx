@@ -18,11 +18,14 @@ import type { CSSProperties, FormEvent } from 'react';
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   AuthError,
+  deleteGraphView,
   deleteGraphGroup,
   deleteGraphTemplate,
   encodeBasicAuth,
+  loadGraphViews,
   loadJson,
   loadGraphGroups,
+  loadNodeOccurrences,
   loadGraphTemplate,
   loadGraphTemplates,
   saveAnnotation,
@@ -30,14 +33,38 @@ import {
   saveCustomGraphDefinition,
   saveGraphGroup,
   saveGraphTemplate,
+  saveGraphView,
   type GraphGroupRecord,
   type GraphTemplateDefinition,
   type GraphTemplateEdge,
   type GraphTemplateGroup,
   type GraphTemplateNode,
   type GraphTemplateRecord,
+  type GraphViewRecord,
+  type NodeOccurrence,
 } from '../graphApiClient';
+import {
+  downloadGraphPresentation,
+  downloadGraphSvg,
+  type GraphExport,
+} from '../graphExport';
 import { arrangeGraphNodes, parseCreatedAt, type LayoutMode } from '../graphLayout';
+import {
+  attributeOptions as buildAttributeOptions,
+  branchRoots,
+  canonicalNodeLabel,
+  EMPTY_ATTRIBUTE_FILTERS,
+  hiddenBranchNodeIds,
+  hierarchyLevels,
+  matchesAttributeFilters,
+  metricValue,
+  nodeMetadata,
+  type AttributeFilters,
+  type AttributeOptions,
+  type MetricMode,
+  type NodeMetadata,
+  type SemanticNode,
+} from '../graphSemantics';
 import {
   descendantNodeIds,
   groupIdFromNode,
@@ -47,7 +74,9 @@ import {
   type GroupProjection,
 } from '../graphWorkspace';
 import type { Graph3DLink, Graph3DNode, Position3D } from './Graph3DView';
+import { GraphLegend, type LegendEntry } from './GraphLegend';
 import { ReadableEdge, type EdgeRoutingData } from './ReadableEdge';
+import { VisualizationTools } from './VisualizationTools';
 
 const Graph3DView = lazy(() => import('./Graph3DView'));
 
@@ -136,6 +165,13 @@ type NotationNodeData = {
   base: BaseNodeState;
   style: Record<string, string | number>;
   raw: Record<string, unknown>;
+  hierarchyLevel?: number;
+  branchCollapsed?: boolean;
+  hasBranch?: boolean;
+  sharedMapCount?: number;
+  metricMode?: MetricMode;
+  metricValue?: string;
+  onToggleBranch?: () => void;
 };
 
 type EditableEdgeData = EdgeRoutingData & {
@@ -237,12 +273,21 @@ export function GraphViewer({ apiBaseUrl }: GraphViewerProps) {
   const [saveStatus, setSaveStatus] = useState('');
   const [hiddenNodeTypes, setHiddenNodeTypes] = useState<string[]>([]);
   const [hiddenEdgeTypes, setHiddenEdgeTypes] = useState<string[]>([]);
+  const [hiddenLevels, setHiddenLevels] = useState<number[]>([]);
+  const [collapsedBranches, setCollapsedBranches] = useState<string[]>([]);
+  const [attributeFilters, setAttributeFilters] = useState<AttributeFilters>(
+    EMPTY_ATTRIBUTE_FILTERS,
+  );
+  const [metricMode, setMetricMode] = useState<MetricMode>('planned');
   const [graphRefresh, setGraphRefresh] = useState(0);
   const [groups, setGroups] = useState<GraphGroupRecord[]>([]);
   const [templates, setTemplates] = useState<GraphTemplateRecord[]>([]);
+  const [views, setViews] = useState<GraphViewRecord[]>([]);
+  const [occurrences, setOccurrences] = useState<NodeOccurrence[]>([]);
   const [selectedGroupIds, setSelectedGroupIds] = useState<string[]>([]);
   const [groupRefresh, setGroupRefresh] = useState(0);
   const [templateRefresh, setTemplateRefresh] = useState(0);
+  const [viewRefresh, setViewRefresh] = useState(0);
   const [flowInstance, setFlowInstance] = useState<ReactFlowInstance<Node<NotationNodeData>, Edge<EditableEdgeData>> | null>(null);
   const [nodes, setNodes, onNodesChange] = useNodesState<Node<NotationNodeData>>([]);
   const [edges, setEdges, onEdgesChange] = useEdgesState<Edge<EditableEdgeData>>([]);
@@ -252,6 +297,7 @@ export function GraphViewer({ apiBaseUrl }: GraphViewerProps) {
   const latestSaveRequests = useRef(new Map<string, AnnotationRequest>());
   const annotationRevisions = useRef(new Map<string, number>());
   const pendingSaves = useRef(0);
+  const pendingViewport = useRef<{ x: number; y: number; zoom: number } | null>(null);
 
   const selectedNode = useMemo(
     () => (selected?.kind === 'node' ? nodes.find((node) => node.id === selected.id) : undefined),
@@ -270,9 +316,78 @@ export function GraphViewer({ apiBaseUrl }: GraphViewerProps) {
     () => nodes.filter((node) => node.selected && !node.id.startsWith('__')).map((node) => node.id),
     [nodes],
   );
+  const semanticNodes = useMemo(() => nodes
+    .filter((node) => !node.id.startsWith('__'))
+    .map(toSemanticNode), [nodes]);
+  const semanticById = useMemo(
+    () => new Map(semanticNodes.map((node) => [node.id, node])),
+    [semanticNodes],
+  );
+  const metadataOptions = useMemo(() => buildAttributeOptions(semanticNodes), [semanticNodes]);
+  const nodeLevels = useMemo(
+    () => hierarchyLevels(
+      semanticNodes,
+      edges.map((edge) => ({
+        source: edge.source,
+        target: edge.target,
+        type: edgeData(edge).edgeType,
+      })),
+    ),
+    [edges, semanticNodes],
+  );
+  const levelOptions = useMemo(() => {
+    const counts = new Map<number, number>();
+    nodeLevels.forEach((level) => counts.set(level, (counts.get(level) || 0) + 1));
+    return [...counts.entries()]
+      .sort(([left], [right]) => left - right)
+      .map(([level, count]) => ({ level, count }));
+  }, [nodeLevels]);
+  const branchRootIds = useMemo(
+    () => branchRoots(edges.map((edge) => ({
+      source: edge.source,
+      target: edge.target,
+      type: edgeData(edge).edgeType,
+    }))),
+    [edges],
+  );
+  const branchHiddenNodeIds = useMemo(
+    () => hiddenBranchNodeIds(
+      new Set(collapsedBranches),
+      edges.map((edge) => ({
+        source: edge.source,
+        target: edge.target,
+        type: edgeData(edge).edgeType,
+      })),
+    ),
+    [collapsedBranches, edges],
+  );
+  const occurrencesByKey = useMemo(
+    () => new Map(occurrences.map((item) => [item.key, item])),
+    [occurrences],
+  );
   const filteredNodes = useMemo(
-    () => nodes.filter((node) => !hiddenNodeTypes.includes(node.data.nodeType)),
-    [hiddenNodeTypes, nodes],
+    () => nodes.filter((node) => {
+      if (node.id.startsWith('__')) {
+        return true;
+      }
+      const semantic = semanticById.get(node.id);
+      const level = nodeLevels.get(node.id) || 0;
+      return (
+        !hiddenNodeTypes.includes(node.data.nodeType)
+        && !hiddenLevels.includes(level)
+        && !branchHiddenNodeIds.has(node.id)
+        && Boolean(semantic && matchesAttributeFilters(semantic, attributeFilters))
+      );
+    }),
+    [
+      attributeFilters,
+      branchHiddenNodeIds,
+      hiddenLevels,
+      hiddenNodeTypes,
+      nodeLevels,
+      nodes,
+      semanticById,
+    ],
   );
   const filteredEdges = useMemo(() => {
     const visibleNodeIds = new Set(filteredNodes.map((node) => node.id));
@@ -312,9 +427,35 @@ export function GraphViewer({ apiBaseUrl }: GraphViewerProps) {
     );
     return [
       ...workspaceProjection.groups.map(groupProjectionNode),
-      ...graphNodes,
+      ...graphNodes.map((node) => {
+        const semantic = semanticById.get(node.id);
+        const metadata = semantic ? nodeMetadata(semantic) : null;
+        const occurrence = occurrencesByKey.get(canonicalNodeLabel(node.data.label));
+        return {
+          ...node,
+          data: {
+            ...node.data,
+            hierarchyLevel: nodeLevels.get(node.id) || 0,
+            hasBranch: branchRootIds.has(node.id),
+            branchCollapsed: collapsedBranches.includes(node.id),
+            sharedMapCount: occurrence?.map_count || 1,
+            metricMode,
+            metricValue: metadata ? metricValue(metadata, metricMode) : '',
+            onToggleBranch: () => toggleBranch(node.id),
+          },
+        };
+      }),
     ];
-  }, [filteredNodes, workspaceProjection]);
+  }, [
+    branchRootIds,
+    collapsedBranches,
+    filteredNodes,
+    metricMode,
+    nodeLevels,
+    occurrencesByKey,
+    semanticById,
+    workspaceProjection,
+  ]);
   const visibleEdges = useMemo(() => {
     const edgesById = new Map(filteredEdges.map((edge) => [edge.id, edge]));
     const projected = workspaceProjection.edges.flatMap((edge) => {
@@ -358,6 +499,8 @@ export function GraphViewer({ apiBaseUrl }: GraphViewerProps) {
         nodeType: node.data.nodeType,
         shape: node.data.shape,
         imageUrl: node.data.imageUrl,
+        sharedMapCount: node.data.sharedMapCount || 1,
+        metric: node.data.metricValue || '',
         ...node.data.position3d,
       })),
     [visibleNodes],
@@ -372,6 +515,24 @@ export function GraphViewer({ apiBaseUrl }: GraphViewerProps) {
     })),
     [visibleEdges],
   );
+  const nodeLegendEntries = useMemo<LegendEntry[]>(() => uniqueByType(
+    visibleNodes
+      .filter((node) => !node.id.startsWith('__'))
+      .map((node) => ({
+        type: node.data.nodeType,
+        color: String(node.data.style.borderColor || node.data.style.background || '#64748b'),
+      })),
+  ), [visibleNodes]);
+  const edgeLegendEntries = useMemo<LegendEntry[]>(() => uniqueByType(
+    visibleEdges.map((edge) => {
+      const style = edgeTypeStyle(edgeData(edge).edgeType);
+      return {
+        type: edgeData(edge).edgeType,
+        color: String(style.stroke || '#64748b'),
+        dashed: Boolean(style.strokeDasharray),
+      };
+    }),
+  ), [visibleEdges]);
 
   useEffect(() => {
     window.localStorage.setItem('graphflow-background', invertedBackground ? 'dark' : 'light');
@@ -477,13 +638,35 @@ export function GraphViewer({ apiBaseUrl }: GraphViewerProps) {
   }, [apiBaseUrl, authToken, templateRefresh]);
 
   useEffect(() => {
+    if (!authToken) {
+      setOccurrences([]);
+      return;
+    }
+    const controller = new AbortController();
+    void loadNodeOccurrences(apiBaseUrl, authToken, notation, controller.signal)
+      .then(({ occurrences: loadedOccurrences }) => setOccurrences(loadedOccurrences))
+      .catch((requestError: Error) => handleRequestError(requestError, setAuthToken, setError));
+    return () => controller.abort();
+  }, [apiBaseUrl, authToken, notation]);
+
+  useEffect(() => {
+    if (!authToken || !payload?.graph_id.startsWith('run:') && !payload?.graph_id.startsWith('graph:')) {
+      setViews([]);
+      return;
+    }
+    const controller = new AbortController();
+    void loadGraphViews(apiBaseUrl, authToken, payload.graph_id, controller.signal)
+      .then(({ views: loadedViews }) => setViews(loadedViews))
+      .catch((requestError: Error) => handleRequestError(requestError, setAuthToken, setError));
+    return () => controller.abort();
+  }, [apiBaseUrl, authToken, payload?.graph_id, viewRefresh]);
+
+  useEffect(() => {
     const graph = toReactFlow(payload);
     setNodes(graph.nodes);
     setEdges(graph.edges);
     setSelected(null);
     setSaveStatus('');
-    setHiddenNodeTypes([]);
-    setHiddenEdgeTypes([]);
     setSelectedGroupIds([]);
     for (const timer of saveTimers.current.values()) {
       clearTimeout(timer);
@@ -505,6 +688,18 @@ export function GraphViewer({ apiBaseUrl }: GraphViewerProps) {
       );
     }
   }, [notation, payload, setEdges, setNodes]);
+
+  useEffect(() => {
+    const viewport = pendingViewport.current;
+    if (!viewport || !flowInstance || isLoading || viewMode !== '2d' || nodes.length === 0) {
+      return;
+    }
+    const frame = window.requestAnimationFrame(() => {
+      void flowInstance.setViewport(viewport, { duration: 250 });
+      pendingViewport.current = null;
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [flowInstance, isLoading, nodes, viewMode]);
 
   const enqueueAnnotation = useCallback(
     (request: AnnotationRequest) => {
@@ -638,6 +833,8 @@ export function GraphViewer({ apiBaseUrl }: GraphViewerProps) {
     setEdges([]);
     setGroups([]);
     setTemplates([]);
+    setViews([]);
+    setOccurrences([]);
     setSelectedGroupIds([]);
     setSelected(null);
     setLoginForm({ username: '', password: '' });
@@ -646,12 +843,147 @@ export function GraphViewer({ apiBaseUrl }: GraphViewerProps) {
 
   async function changeRun(runId: string) {
     await flushPendingAnnotations();
+    resetVisualizationState();
     setSelectedRunId(runId);
   }
 
   async function changeNotation(nextNotation: Notation) {
     await flushPendingAnnotations();
     setNotation(nextNotation);
+  }
+
+  function resetVisualizationState() {
+    setHiddenNodeTypes([]);
+    setHiddenEdgeTypes([]);
+    setHiddenLevels([]);
+    setCollapsedBranches([]);
+    setAttributeFilters({ ...EMPTY_ATTRIBUTE_FILTERS });
+    setMetricMode('planned');
+    pendingViewport.current = null;
+  }
+
+  function toggleBranch(nodeId: string) {
+    setCollapsedBranches((current) => toggleValue(current, nodeId));
+  }
+
+  function toggleLevel(level: number) {
+    setHiddenLevels((current) => (
+      current.includes(level) ? current.filter((item) => item !== level) : [...current, level]
+    ));
+  }
+
+  function updateAttributeFilter(field: keyof AttributeFilters, value: string) {
+    setAttributeFilters((current) => ({ ...current, [field]: value }));
+  }
+
+  async function saveCurrentView(name: string) {
+    if (!payload?.graph_id.startsWith('run:') && !payload?.graph_id.startsWith('graph:')) {
+      setError('Текущую карту нельзя сохранить как представление.');
+      return;
+    }
+    setSaveStatus('Сохранение представления...');
+    try {
+      const saved = await saveGraphView(apiBaseUrl, authToken, {
+        graph_id: payload.graph_id,
+        view_id: uniqueId('view'),
+        name,
+        revision: 0,
+        state: {
+          notation,
+          view_mode: viewMode,
+          metric_mode: metricMode,
+          inverted_background: invertedBackground,
+          hidden_node_types: hiddenNodeTypes,
+          hidden_edge_types: hiddenEdgeTypes,
+          hidden_levels: hiddenLevels,
+          attribute_filters: attributeFilters,
+          collapsed_branches: collapsedBranches,
+          viewport: flowInstance?.getViewport() || {},
+        },
+      });
+      setViews((current) => [saved, ...current.filter((view) => view.view_id !== saved.view_id)]);
+      setError('');
+      setSaveStatus('Сохранено');
+    } catch (requestError) {
+      handleRequestError(requestError as Error, setAuthToken, setError, setSaveStatus);
+    }
+  }
+
+  async function applySavedView(view: GraphViewRecord) {
+    await flushPendingAnnotations();
+    const state = view.state;
+    setNotation(isNotation(state.notation) ? state.notation : 'flow');
+    setViewMode(state.view_mode);
+    setMetricMode(state.metric_mode);
+    setInvertedBackground(state.inverted_background);
+    setHiddenNodeTypes([...state.hidden_node_types]);
+    setHiddenEdgeTypes([...state.hidden_edge_types]);
+    setHiddenLevels([...state.hidden_levels]);
+    setAttributeFilters({ ...state.attribute_filters });
+    setCollapsedBranches([...state.collapsed_branches]);
+    const viewport = state.viewport as Partial<{ x: number; y: number; zoom: number }>;
+    pendingViewport.current = (
+      typeof viewport.x === 'number'
+      && typeof viewport.y === 'number'
+      && typeof viewport.zoom === 'number'
+    ) ? { x: viewport.x, y: viewport.y, zoom: viewport.zoom } : null;
+    setSelected(null);
+    setError('');
+    setSaveStatus(`Открыто: ${view.name}`);
+  }
+
+  async function removeSavedView(viewId: string) {
+    if (!payload?.graph_id) {
+      return;
+    }
+    setSaveStatus('Удаление представления...');
+    try {
+      await deleteGraphView(apiBaseUrl, authToken, payload.graph_id, viewId);
+      setViews((current) => current.filter((view) => view.view_id !== viewId));
+      setError('');
+      setSaveStatus('Сохранено');
+    } catch (requestError) {
+      handleRequestError(requestError as Error, setAuthToken, setError, setSaveStatus);
+      setViewRefresh((value) => value + 1);
+    }
+  }
+
+  function exportGraph(): GraphExport {
+    const exportNodes = visibleNodes
+      .filter((node) => node.id !== '__system_boundary')
+      .filter((node) => !groupIdFromNode(node.id) || Boolean(node.data.raw.collapsed));
+    const exportNodeIds = new Set(exportNodes.map((node) => node.id));
+    return {
+      title: payload?.title || 'GraphFlow',
+      nodes: exportNodes.map((node) => ({
+        id: node.id,
+        label: node.data.label,
+        nodeType: node.data.nodeType,
+        shape: node.data.shape,
+        position: node.position,
+        width: node.measured?.width,
+        height: node.measured?.height,
+        fill: String(node.data.style.background || '#ffffff'),
+        stroke: String(node.data.style.borderColor || '#334155'),
+        metric: node.data.metricValue
+          ? `${metricMode === 'planned' ? 'План' : 'Факт'}: ${node.data.metricValue}`
+          : '',
+        sharedMapCount: node.data.sharedMapCount,
+      })),
+      edges: visibleEdges
+        .filter((edge) => exportNodeIds.has(edge.source) && exportNodeIds.has(edge.target))
+        .map((edge) => {
+          const style = edgeTypeStyle(edgeData(edge).edgeType);
+          return {
+            source: edge.source,
+            target: edge.target,
+            label: edgeData(edge).label,
+            edgeType: edgeData(edge).edgeType,
+            stroke: String(style.stroke || '#64748b'),
+            dashed: Boolean(style.strokeDasharray),
+          };
+        }),
+    };
   }
 
   function updateNode(id: string, patch: Partial<NotationNodeData>) {
@@ -1290,6 +1622,22 @@ export function GraphViewer({ apiBaseUrl }: GraphViewerProps) {
                 3D
               </button>
             </div>
+            <div className="view-mode" role="group" aria-label="Плановые и фактические значения">
+              <button
+                type="button"
+                className={metricMode === 'planned' ? 'is-active' : ''}
+                onClick={() => setMetricMode('planned')}
+              >
+                План
+              </button>
+              <button
+                type="button"
+                className={metricMode === 'actual' ? 'is-active' : ''}
+                onClick={() => setMetricMode('actual')}
+              >
+                Факт
+              </button>
+            </div>
             <label className="background-toggle">
               <input
                 type="checkbox"
@@ -1298,28 +1646,34 @@ export function GraphViewer({ apiBaseUrl }: GraphViewerProps) {
               />
               Темная тема
             </label>
-            <select
-              value={selectedRunId}
-              disabled={isLoading}
-              onChange={(event) => void changeRun(event.target.value)}
-            >
-              {runs.map((run) => (
-                <option key={run.run_id} value={run.run_id}>
-                  {runOptionLabel(run)}
-                </option>
-              ))}
-            </select>
-            <select
-              value={notation}
-              disabled={isLoading}
-              onChange={(event) => void changeNotation(event.target.value as Notation)}
-            >
-              {NOTATIONS.map((item) => (
-                <option key={item.value} value={item.value}>
-                  {item.label}
-                </option>
-              ))}
-            </select>
+            <label className="toolbar-field toolbar-map-field">
+              <span>Карта</span>
+              <select
+                value={selectedRunId}
+                disabled={isLoading}
+                onChange={(event) => void changeRun(event.target.value)}
+              >
+                {runs.map((run) => (
+                  <option key={run.run_id} value={run.run_id}>
+                    {runOptionLabel(run)}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="toolbar-field">
+              <span>Нотация</span>
+              <select
+                value={notation}
+                disabled={isLoading}
+                onChange={(event) => void changeNotation(event.target.value as Notation)}
+              >
+                {NOTATIONS.map((item) => (
+                  <option key={item.value} value={item.value}>
+                    {item.label}
+                  </option>
+                ))}
+              </select>
+            </label>
             <button type="button" onClick={() => void logout()}>
               Выйти
             </button>
@@ -1338,10 +1692,7 @@ export function GraphViewer({ apiBaseUrl }: GraphViewerProps) {
             hiddenEdgeTypes={hiddenEdgeTypes}
             onToggleNodeType={toggleNodeType}
             onToggleEdgeType={toggleEdgeType}
-            onReset={() => {
-              setHiddenNodeTypes([]);
-              setHiddenEdgeTypes([]);
-            }}
+            onReset={resetVisualizationState}
             onApplyLayout={applyLayout}
             showLayouts={viewMode === '2d'}
             editableGraph={Boolean(payload?.graph_id.startsWith('graph:'))}
@@ -1367,6 +1718,18 @@ export function GraphViewer({ apiBaseUrl }: GraphViewerProps) {
             onSaveTemplate={saveTemplate}
             onApplyTemplate={applyTemplate}
             onDeleteTemplate={removeTemplate}
+            attributeOptions={metadataOptions}
+            attributeFilters={attributeFilters}
+            onAttributeFilterChange={updateAttributeFilter}
+            levels={levelOptions}
+            hiddenLevels={hiddenLevels}
+            onToggleLevel={toggleLevel}
+            views={views}
+            onSaveView={saveCurrentView}
+            onApplyView={applySavedView}
+            onDeleteView={removeSavedView}
+            onExportSvg={() => downloadGraphSvg(exportGraph())}
+            onExportPresentation={() => downloadGraphPresentation(exportGraph())}
           />
           <section
             className={`graph-canvas${invertedBackground ? ' is-inverted' : ''}`}
@@ -1437,6 +1800,11 @@ export function GraphViewer({ apiBaseUrl }: GraphViewerProps) {
                 />
               </Suspense>
             )}
+            <GraphLegend
+              nodeEntries={nodeLegendEntries}
+              edgeEntries={edgeLegendEntries}
+              hasSharedNodes={visibleNodes.some((node) => (node.data.sharedMapCount || 1) > 1)}
+            />
           </section>
 
           <Inspector
@@ -1453,6 +1821,10 @@ export function GraphViewer({ apiBaseUrl }: GraphViewerProps) {
             onAddEdgeProperty={addEdgeProperty}
             onResetEdgeField={resetEdgeField}
             onError={setError}
+            metricMode={metricMode}
+            sharedMapCount={selectedNode
+              ? occurrencesByKey.get(canonicalNodeLabel(selectedNode.data.label))?.map_count || 1
+              : 1}
           />
         </main>
       </div>
@@ -1537,6 +1909,18 @@ function GraphFilters({
   onSaveTemplate,
   onApplyTemplate,
   onDeleteTemplate,
+  attributeOptions,
+  attributeFilters,
+  onAttributeFilterChange,
+  levels,
+  hiddenLevels,
+  onToggleLevel,
+  views,
+  onSaveView,
+  onApplyView,
+  onDeleteView,
+  onExportSvg,
+  onExportPresentation,
 }: {
   nodeTypes: string[];
   edgeTypes: string[];
@@ -1566,6 +1950,18 @@ function GraphFilters({
   onSaveTemplate: (name: string, scope: 'selection' | 'graph') => void;
   onApplyTemplate: (templateId: string) => void;
   onDeleteTemplate: (templateId: string) => void;
+  attributeOptions: AttributeOptions;
+  attributeFilters: AttributeFilters;
+  onAttributeFilterChange: (field: keyof AttributeFilters, value: string) => void;
+  levels: Array<{ level: number; count: number }>;
+  hiddenLevels: number[];
+  onToggleLevel: (level: number) => void;
+  views: GraphViewRecord[];
+  onSaveView: (name: string) => void;
+  onApplyView: (view: GraphViewRecord) => void;
+  onDeleteView: (viewId: string) => void;
+  onExportSvg: () => void;
+  onExportPresentation: () => void;
 }) {
   const [nodeLabel, setNodeLabel] = useState('Новый узел');
   const [nodeType, setNodeType] = useState('process');
@@ -1621,6 +2017,20 @@ function GraphFilters({
           </label>
         ))}
       </section>
+      <VisualizationTools
+        attributeOptions={attributeOptions}
+        filters={attributeFilters}
+        onFilterChange={onAttributeFilterChange}
+        levels={levels}
+        hiddenLevels={hiddenLevels}
+        onToggleLevel={onToggleLevel}
+        views={views}
+        onSaveView={onSaveView}
+        onApplyView={onApplyView}
+        onDeleteView={onDeleteView}
+        onExportSvg={onExportSvg}
+        onExportPresentation={onExportPresentation}
+      />
       {showLayouts ? (
         <section className="filter-section">
           <h3>Раскладка</h3>
@@ -1757,7 +2167,9 @@ function GraphFilters({
               <option value="process">process</option>
               <option value="section">section</option>
               <option value="task">task</option>
+              <option value="goal">goal</option>
               <option value="milestone">milestone</option>
+              <option value="organization">organization</option>
               <option value="result">result</option>
             </select>
             <button type="button" onClick={() => onAddNode(nodeLabel.trim() || 'Новый узел', nodeType)}>
@@ -1800,6 +2212,8 @@ function Inspector({
   onAddEdgeProperty,
   onResetEdgeField,
   onError,
+  metricMode,
+  sharedMapCount,
 }: {
   selectedNode?: Node<NotationNodeData>;
   selectedEdge?: Edge<EditableEdgeData>;
@@ -1834,6 +2248,8 @@ function Inspector({
   onAddEdgeProperty: (id: string) => void;
   onResetEdgeField: (id: string, field: 'label' | 'edgeType' | 'properties') => void;
   onError: (message: string) => void;
+  metricMode: MetricMode;
+  sharedMapCount: number;
 }) {
   return (
     <aside className="graph-inspector">
@@ -1848,6 +2264,8 @@ function Inspector({
           onAddProperty={onAddNodeProperty}
           onResetField={onResetNodeField}
           onError={onError}
+          metricMode={metricMode}
+          sharedMapCount={sharedMapCount}
         />
       ) : null}
       {selectedEdge ? (
@@ -1873,6 +2291,8 @@ function NodeEditor({
   onAddProperty,
   onResetField,
   onError,
+  metricMode,
+  sharedMapCount,
 }: {
   node: Node<NotationNodeData>;
   onUpdate: (id: string, patch: Partial<NotationNodeData>) => void;
@@ -1892,9 +2312,18 @@ function NodeEditor({
       | 'position3d',
   ) => void;
   onError: (message: string) => void;
+  metricMode: MetricMode;
+  sharedMapCount: number;
 }) {
+  const metadata = nodeMetadata(toSemanticNode(node));
   return (
     <div className="inspector-section">
+      <NodeSummaryCard
+        metadata={metadata}
+        metricMode={metricMode}
+        sharedMapCount={sharedMapCount}
+        nodeType={node.data.nodeType}
+      />
       <label>
         <FieldHeader title="Label" onReset={() => onResetField(node.id, 'label')} />
         <textarea
@@ -1998,6 +2427,46 @@ function NodeEditor({
       />
       <pre>{JSON.stringify(node.data.raw, null, 2)}</pre>
     </div>
+  );
+}
+
+function NodeSummaryCard({
+  metadata,
+  metricMode,
+  sharedMapCount,
+  nodeType,
+}: {
+  metadata: NodeMetadata;
+  metricMode: MetricMode;
+  sharedMapCount: number;
+  nodeType: string;
+}) {
+  const metric = metricValue(metadata, metricMode);
+  const sourceIsUrl = /^https?:\/\//i.test(metadata.source);
+  return (
+    <section className="node-summary">
+      <div className="node-summary-heading">
+        <strong>Карточка узла</strong>
+        <span>{nodeType}</span>
+      </div>
+      <dl>
+        <dt>Статус</dt><dd><span className="status-value">{metadata.status || 'Не указан'}</span></dd>
+        <dt>Регион</dt><dd>{metadata.region || 'Не указан'}</dd>
+        <dt>Организация</dt><dd>{metadata.organization || 'Не указана'}</dd>
+        <dt>Год</dt><dd>{metadata.year || 'Не указан'}</dd>
+        <dt>{metricMode === 'planned' ? 'План' : 'Факт'}</dt><dd>{metric || 'Не указан'}</dd>
+        <dt>Карты</dt><dd>{sharedMapCount}</dd>
+      </dl>
+      {metadata.description ? <p>{metadata.description}</p> : null}
+      {metadata.source ? (
+        <div className="node-source">
+          <strong>Источник</strong>
+          {sourceIsUrl
+            ? <a href={metadata.source} target="_blank" rel="noreferrer">{metadata.source}</a>
+            : <span>{metadata.source}</span>}
+        </div>
+      ) : null}
+    </section>
   );
 }
 
@@ -2339,13 +2808,35 @@ function GraphGroupNode({ data }: { data: NotationNodeData }) {
 }
 
 function NotationNode({ data }: { data: NotationNodeData }) {
-  const nodeClass = `notation-node shape-${data.shape}`;
+  const nodeClass = `notation-node shape-${data.shape}${
+    (data.sharedMapCount || 1) > 1 ? ' is-cross-map' : ''
+  }`;
   const className = data.shape === 'diamond' ? `${nodeClass} has-rotated-content` : nodeClass;
   const meta = typeof data.raw.class === 'string' ? data.raw.class : data.nodeType;
 
   return (
     <div className={className} style={nodeInlineStyle(data.style)}>
       <NodeHandles />
+      {data.hasBranch ? (
+        <button
+          className="branch-toggle nodrag nopan"
+          type="button"
+          title={data.branchCollapsed ? 'Развернуть ветку' : 'Свернуть ветку'}
+          aria-label={data.branchCollapsed ? 'Развернуть ветку' : 'Свернуть ветку'}
+          onMouseDown={(event) => event.stopPropagation()}
+          onClick={(event) => {
+            event.stopPropagation();
+            data.onToggleBranch?.();
+          }}
+        >
+          {data.branchCollapsed ? '+' : '−'}
+        </button>
+      ) : null}
+      {(data.sharedMapCount || 1) > 1 ? (
+        <span className="cross-map-badge" title="Узел присутствует в нескольких картах">
+          {data.sharedMapCount}
+        </span>
+      ) : null}
       {data.shape === 'actor' ? <ActorNode label={data.label} imageUrl={data.imageUrl} /> : null}
       {data.shape !== 'actor' ? (
         <div className="node-content">
@@ -2355,6 +2846,11 @@ function NotationNode({ data }: { data: NotationNodeData }) {
           {data.shape === 'class' ? <ClassSections raw={data.raw} /> : null}
           {data.properties.length > 0 ? <NodeProperties properties={data.properties} /> : null}
         </div>
+      ) : null}
+      {data.metricValue ? (
+        <span className="node-metric">
+          {data.metricMode === 'planned' ? 'План' : 'Факт'}: {data.metricValue}
+        </span>
       ) : null}
       {data.shape === 'component' ? <span className="component-mark" /> : null}
     </div>
@@ -2689,6 +3185,26 @@ function finiteNumber(value: unknown, fallback: number): number {
 
 function uniqueValues(values: string[]): string[] {
   return [...new Set(values.filter(Boolean))].sort((left, right) => left.localeCompare(right));
+}
+
+function uniqueByType<T extends { type: string }>(entries: T[]): T[] {
+  return [...new Map(entries.map((entry) => [entry.type, entry])).values()]
+    .sort((left, right) => left.type.localeCompare(right.type));
+}
+
+function toSemanticNode(node: Node<NotationNodeData>): SemanticNode {
+  return {
+    id: node.id,
+    label: node.data.label,
+    nodeType: node.data.nodeType,
+    createdAt: node.data.createdAt,
+    properties: node.data.properties,
+    raw: node.data.raw,
+  };
+}
+
+function isNotation(value: string): value is Notation {
+  return NOTATIONS.some((notation) => notation.value === value);
 }
 
 function toggleValue(values: string[], value: string): string[] {
