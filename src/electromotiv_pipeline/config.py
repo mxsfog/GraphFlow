@@ -8,7 +8,7 @@ DEFAULT_QUERY = "(oil OR crude OR Brent OR WTI) price spike market futures week"
 DEFAULT_MODEL = "deepseek/deepseek-v4-flash"
 DEFAULT_ORIENTDB_URL = "http://127.0.0.1:2480"
 DEFAULT_SCHEMA_PATH = Path(__file__).resolve().parents[2] / "orientdb" / "schema.sql"
-MAX_NEWS_RECORDS = 50
+MAX_NEWS_RECORDS = 100
 
 
 @dataclass(frozen=True)

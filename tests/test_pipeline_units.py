@@ -272,6 +272,23 @@ def test_commands_without_orientdb_can_build_config(monkeypatch, tmp_path: Path)
     assert build_parser().parse_args(["run"]).model is None
 
 
+def test_config_accepts_up_to_100_news_candidates(tmp_path: Path) -> None:
+    config_args = {
+        "env_file": tmp_path / "missing.env",
+        "query": "test",
+        "model": None,
+        "orientdb_url": None,
+        "database": None,
+        "output_path": None,
+        "require_openrouter": False,
+        "require_orientdb": False,
+    }
+
+    assert build_config(max_records=100, **config_args).max_records == 100
+    with pytest.raises(RuntimeError, match="от 1 до 100"):
+        build_config(max_records=101, **config_args)
+
+
 def test_google_sheets_does_not_overwrite_foreign_header(monkeypatch) -> None:
     client = GoogleSheetsClient(
         spreadsheet_id="sheet",
