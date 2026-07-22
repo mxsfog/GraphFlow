@@ -32,6 +32,7 @@ export type GraphTemplateNode = {
   type: string;
   shape: string;
   created_at: string;
+  ended_at: string;
   x: number;
   y: number;
   position3d: { x: number; y: number; z: number };

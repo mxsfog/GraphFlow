@@ -98,6 +98,7 @@ CREATE PROPERTY GraphNode.label STRING;
 CREATE PROPERTY GraphNode.node_type STRING;
 CREATE PROPERTY GraphNode.shape STRING;
 CREATE PROPERTY GraphNode.created_at DATETIME;
+CREATE PROPERTY GraphNode.ended_at DATETIME;
 CREATE PROPERTY GraphNode.updated_at DATETIME;
 CREATE PROPERTY GraphNode.position_x INTEGER;
 CREATE PROPERTY GraphNode.position_y INTEGER;

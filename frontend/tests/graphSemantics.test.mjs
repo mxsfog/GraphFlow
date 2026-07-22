@@ -9,8 +9,8 @@ import {
   nodeMetadata,
 } from '../../.runtime/frontend-tests/src/graphSemantics.js';
 
-function node(id, properties = [], raw = {}, nodeType = 'task', createdAt = '') {
-  return { id, label: id, nodeType, createdAt, properties, raw };
+function node(id, properties = [], raw = {}, nodeType = 'task', createdAt = '', endedAt = '') {
+  return { id, label: id, nodeType, createdAt, endedAt, properties, raw };
 }
 
 test('метаданны читаются из properties и raw с русскими алиасами', () => {
@@ -31,6 +31,27 @@ test('метаданны читаются из properties и raw с русски
   assert.equal(metadata.year, '2026');
   assert.equal(metadata.planned, '10');
   assert.equal(metadata.actual, '7');
+  assert.equal(metadata.createdAt, '2026-07-20T10:00:00Z');
+  assert.equal(metadata.endedAt, '');
+});
+
+test('фильтр по году учитывает весь период актуальности', () => {
+  const ranged = node(
+    'period',
+    [],
+    {},
+    'task',
+    '2024-01-01T00:00:00Z',
+    '2026-12-31T23:59:59Z',
+  );
+
+  assert.deepEqual(attributeOptions([ranged]).year, ['2024', '2025', '2026']);
+  assert.equal(matchesAttributeFilters(ranged, {
+    status: '', region: '', organization: '', year: '2025',
+  }), true);
+  assert.equal(matchesAttributeFilters(ranged, {
+    status: '', region: '', organization: '', year: '2027',
+  }), false);
 });
 
 test('атрибутные фильтры и опции используют единую нормализацию', () => {

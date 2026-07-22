@@ -142,6 +142,7 @@ type BaseNodeState = {
   shape: string;
   imageUrl: string;
   createdAt: string;
+  endedAt: string;
   position: { x: number; y: number };
   position3d: Position3D;
   properties: EditableProperty[];
@@ -159,6 +160,7 @@ type NotationNodeData = {
   nodeType: string;
   imageUrl: string;
   createdAt: string;
+  endedAt: string;
   position3d: Position3D;
   properties: EditableProperty[];
   annotationRevision: number;
@@ -1060,6 +1062,7 @@ export function GraphViewer({ apiBaseUrl }: GraphViewerProps) {
       | 'shape'
       | 'imageUrl'
       | 'createdAt'
+      | 'endedAt'
       | 'properties'
       | 'position'
       | 'position3d',
@@ -1455,6 +1458,7 @@ export function GraphViewer({ apiBaseUrl }: GraphViewerProps) {
       shape: 'rounded_rectangle',
       imageUrl: '',
       createdAt: new Date().toISOString(),
+      endedAt: '',
       position: { x: 0, y: 0 },
       position3d: { x: 0, y: 0, z: 0 },
       properties: [],
@@ -1469,6 +1473,7 @@ export function GraphViewer({ apiBaseUrl }: GraphViewerProps) {
         nodeType,
         imageUrl: '',
         createdAt: base.createdAt,
+        endedAt: base.endedAt,
         position3d: base.position3d,
         properties: [],
         annotationRevision: 0,
@@ -2234,6 +2239,7 @@ function Inspector({
       | 'shape'
       | 'imageUrl'
       | 'createdAt'
+      | 'endedAt'
       | 'properties'
       | 'position'
       | 'position3d',
@@ -2307,6 +2313,7 @@ function NodeEditor({
       | 'shape'
       | 'imageUrl'
       | 'createdAt'
+      | 'endedAt'
       | 'properties'
       | 'position'
       | 'position3d',
@@ -2368,10 +2375,25 @@ function NodeEditor({
         />
       </label>
       <label>
-        <FieldHeader title="Created At" onReset={() => onResetField(node.id, 'createdAt')} />
-        <input
+        <FieldHeader
+          title="Начало актуальности (created_at)"
+          onReset={() => onResetField(node.id, 'createdAt')}
+        />
+        <DraftInput
           value={node.data.createdAt}
-          onChange={(event) => onUpdate(node.id, { createdAt: event.target.value })}
+          placeholder="2026-07-22T10:00:00Z"
+          onCommit={(createdAt) => onUpdate(node.id, { createdAt })}
+        />
+      </label>
+      <label>
+        <FieldHeader
+          title="Окончание актуальности (ended_at)"
+          onReset={() => onResetField(node.id, 'endedAt')}
+        />
+        <DraftInput
+          value={node.data.endedAt}
+          placeholder="2026-12-31T18:00:00Z"
+          onCommit={(endedAt) => onUpdate(node.id, { endedAt })}
         />
       </label>
       <div className="coordinate-editor">
@@ -2442,6 +2464,7 @@ function NodeSummaryCard({
   nodeType: string;
 }) {
   const metric = metricValue(metadata, metricMode);
+  const validity = validityPeriodLabel(metadata.createdAt, metadata.endedAt);
   const sourceIsUrl = /^https?:\/\//i.test(metadata.source);
   return (
     <section className="node-summary">
@@ -2454,6 +2477,7 @@ function NodeSummaryCard({
         <dt>Регион</dt><dd>{metadata.region || 'Не указан'}</dd>
         <dt>Организация</dt><dd>{metadata.organization || 'Не указана'}</dd>
         <dt>Год</dt><dd>{metadata.year || 'Не указан'}</dd>
+        <dt>Актуальность</dt><dd>{validity || 'Не указана'}</dd>
         <dt>{metricMode === 'planned' ? 'План' : 'Факт'}</dt><dd>{metric || 'Не указан'}</dd>
         <dt>Карты</dt><dd>{sharedMapCount}</dd>
       </dl>
@@ -2576,15 +2600,18 @@ function FieldHeader({ title, onReset }: { title: string; onReset: () => void })
 function DraftInput({
   value,
   onCommit,
+  placeholder,
 }: {
   value: string;
   onCommit: (value: string) => void;
+  placeholder?: string;
 }) {
   const [draft, setDraft] = useState(value);
   useEffect(() => setDraft(value), [value]);
   return (
     <input
       value={draft}
+      placeholder={placeholder}
       onChange={(event) => setDraft(event.target.value)}
       onBlur={() => onCommit(draft.trim())}
       onKeyDown={(event) => {
@@ -2665,6 +2692,7 @@ function toReactFlow(payload: GraphPayload | null): {
         nodeType: node.type,
         imageUrl: stringField(node.data.imageUrl || node.data.image_url),
         createdAt: stringField(node.data.created_at || node.data.createdAt),
+        endedAt: stringField(node.data.ended_at || node.data.endedAt),
         position3d: position3DField(node.data.position3d, base.position3d),
         properties: propertiesFromUnknown(node.data.properties),
         annotationRevision: numberField(node.data.annotation_revision),
@@ -2689,6 +2717,7 @@ function toReactFlow(payload: GraphPayload | null): {
         nodeType: 'boundary',
         imageUrl: '',
         createdAt: '',
+        endedAt: '',
         position3d: { x: 0, y: 0, z: 0 },
         properties: [],
         annotationRevision: 0,
@@ -2697,6 +2726,7 @@ function toReactFlow(payload: GraphPayload | null): {
           shape: 'boundary',
           imageUrl: '',
           createdAt: '',
+          endedAt: '',
           position: { x: -80, y: -120 },
           position3d: { x: 0, y: 0, z: 0 },
           properties: [],
@@ -2756,6 +2786,7 @@ function groupProjectionNode(group: GroupProjection): Node<NotationNodeData> {
     shape: 'component',
     imageUrl: '',
     createdAt: '',
+    endedAt: '',
     position: group.position,
     position3d,
     properties: [],
@@ -2770,6 +2801,7 @@ function groupProjectionNode(group: GroupProjection): Node<NotationNodeData> {
       nodeType: 'group',
       imageUrl: '',
       createdAt: '',
+      endedAt: '',
       position3d,
       properties: [],
       annotationRevision: 0,
@@ -2813,6 +2845,7 @@ function NotationNode({ data }: { data: NotationNodeData }) {
   }`;
   const className = data.shape === 'diamond' ? `${nodeClass} has-rotated-content` : nodeClass;
   const meta = typeof data.raw.class === 'string' ? data.raw.class : data.nodeType;
+  const validity = validityPeriodLabel(data.createdAt, data.endedAt);
 
   return (
     <div className={className} style={nodeInlineStyle(data.style)}>
@@ -2845,6 +2878,7 @@ function NotationNode({ data }: { data: NotationNodeData }) {
           {data.shape !== 'class' ? <div className="node-meta">{meta}</div> : null}
           {data.shape === 'class' ? <ClassSections raw={data.raw} /> : null}
           {data.properties.length > 0 ? <NodeProperties properties={data.properties} /> : null}
+          {validity ? <div className="node-time">{validity}</div> : null}
         </div>
       ) : null}
       {data.metricValue ? (
@@ -3071,6 +3105,7 @@ function nodeAnnotationPayload(node: Node<NotationNodeData>): Record<string, unk
     shape: node.data.shape,
     imageUrl: node.data.imageUrl,
     createdAt: node.data.createdAt,
+    endedAt: node.data.endedAt,
     properties: node.data.properties,
     position: {
       x: Math.round(node.position.x),
@@ -3087,6 +3122,7 @@ function customNodePayload(node: Node<NotationNodeData>): GraphTemplateNode {
     type: node.data.nodeType,
     shape: node.data.shape,
     created_at: node.data.createdAt,
+    ended_at: node.data.endedAt,
     x: Math.round(node.position.x),
     y: Math.round(node.position.y),
     position3d: node.data.position3d,
@@ -3123,6 +3159,7 @@ function nodeBase(node: GraphApiNode): BaseNodeState {
     shape: stringField(base.shape) || node.shape,
     imageUrl: stringField(base.imageUrl),
     createdAt: stringField(base.createdAt),
+    endedAt: stringField(base.endedAt),
     position: positionField(base.position, node.position),
     position3d: position3DField(base.position3d, position3DField(node.data.position3d)),
     properties: propertiesFromUnknown(base.properties),
@@ -3183,6 +3220,20 @@ function finiteNumber(value: unknown, fallback: number): number {
   return Number.isFinite(parsed) ? parsed : fallback;
 }
 
+function validityPeriodLabel(createdAt: string, endedAt: string): string {
+  const start = shortDateLabel(createdAt);
+  const end = shortDateLabel(endedAt);
+  if (start && end) {
+    return start === end ? start : `${start} - ${end}`;
+  }
+  return start ? `с ${start}` : end ? `до ${end}` : '';
+}
+
+function shortDateLabel(value: string): string {
+  const match = value.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  return match ? `${match[3]}.${match[2]}.${match[1]}` : value.trim();
+}
+
 function uniqueValues(values: string[]): string[] {
   return [...new Set(values.filter(Boolean))].sort((left, right) => left.localeCompare(right));
 }
@@ -3198,6 +3249,7 @@ function toSemanticNode(node: Node<NotationNodeData>): SemanticNode {
     label: node.data.label,
     nodeType: node.data.nodeType,
     createdAt: node.data.createdAt,
+    endedAt: node.data.endedAt,
     properties: node.data.properties,
     raw: node.data.raw,
   };

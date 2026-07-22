@@ -432,6 +432,7 @@ class OrientDBClient:
                     "shape": str(node.get("shape") or "rounded_rectangle"),
                     "created_at": orient_datetime(str(node.get("created_at") or ""))
                     or now_orient(),
+                    "ended_at": orient_datetime(str(node.get("ended_at") or "")),
                     "updated_at": now_orient(),
                     "position_x": int(node.get("x") or 0),
                     "position_y": int(node.get("y") or 0),

@@ -10,10 +10,11 @@ import threading
 import unicodedata
 import urllib.parse
 from dataclasses import dataclass, replace
+from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from electromotiv_pipeline.config import DEFAULT_SCHEMA_PATH
-from electromotiv_pipeline.orientdb import OrientDBClient, now_orient
+from electromotiv_pipeline.orientdb import OrientDBClient, now_orient, parse_datetime
 
 SUPPORTED_NOTATIONS = ("flow", "use_case", "component", "class")
 SUPPORTED_SHAPES = {
@@ -1297,8 +1298,7 @@ def list_node_occurrences(
         raise ValueError(f"Неподдерживаемая нотация: {notation}")
     custom_rows = orient_rows(
         client,
-        "SELECT graph_id, node_id, label FROM GraphNode "
-        f"LIMIT {MAX_OCCURRENCE_ROWS}",
+        f"SELECT graph_id, node_id, label FROM GraphNode LIMIT {MAX_OCCURRENCE_ROWS}",
     )
     annotation_rows = orient_rows(
         client,
@@ -1323,8 +1323,7 @@ def list_node_occurrences(
             entries.append((graph_id, label.strip()))
     search_rows = orient_rows(
         client,
-        "SELECT run_id, title FROM SearchResult "
-        f"LIMIT {MAX_OCCURRENCE_ROWS}",
+        f"SELECT run_id, title FROM SearchResult LIMIT {MAX_OCCURRENCE_ROWS}",
     )
     entries.extend(
         (f"run:{row.get('run_id', '')}", str(row.get("title") or "").strip())
@@ -1420,12 +1419,16 @@ def normalize_custom_node(value: object) -> dict[str, object]:
         value.get("position3d"),
         {"x": 0.0, "y": 0.0, "z": 0.0},
     )
+    created_at = str(value.get("created_at") or value.get("createdAt") or "")
+    ended_at = str(value.get("ended_at") or value.get("endedAt") or "")
+    validate_temporal_interval(created_at, ended_at)
     return {
         "id": node_id,
         "label": str(value.get("label") or node_id)[:1000],
         "type": str(value.get("type") or "process")[:100],
         "shape": shape,
-        "created_at": str(value.get("created_at") or ""),
+        "created_at": created_at,
+        "ended_at": ended_at,
         "x": int_or_default(value.get("x"), 0),
         "y": int_or_default(value.get("y"), 0),
         "position3d": position_3d,
@@ -1762,6 +1765,7 @@ def custom_node_from_row(row: dict[str, object], *, notation: str) -> ApiNode:
         data={
             "class": "GraphNode",
             "created_at": row.get("created_at", ""),
+            "ended_at": row.get("ended_at", ""),
             "imageUrl": row.get("image_data", ""),
             "properties": json_list(row.get("properties_json")),
             "position3d": {
@@ -1856,6 +1860,7 @@ def apply_node_annotation(
         or node.data.get("published_at")
         or "",
     )
+    base_ended_at = str(node.data.get("ended_at") or node.data.get("finished_at") or "")
     base_image_url = str(node.data.get("imageUrl") or node.data.get("image_url") or "")
     base_properties = list_value(node.data.get("properties"))
     base_position_3d = position_3d_value(
@@ -1868,6 +1873,7 @@ def apply_node_annotation(
         "position": node.position,
         "imageUrl": base_image_url,
         "createdAt": base_created_at,
+        "endedAt": base_ended_at,
         "properties": base_properties,
         "position3d": base_position_3d,
     }
@@ -1875,6 +1881,7 @@ def apply_node_annotation(
         **node.data,
         "base": base,
         "created_at": base_created_at,
+        "ended_at": base_ended_at,
         "imageUrl": base_image_url,
         "properties": base_properties,
         "position3d": base_position_3d,
@@ -1893,8 +1900,12 @@ def apply_node_annotation(
         base_image_url,
     )
     created_at = string_value(
-        payload.get("createdAt") or payload.get("created_at"),
+        payload.get("createdAt") if "createdAt" in payload else payload.get("created_at"),
         base_created_at,
+    )
+    ended_at = string_value(
+        payload.get("endedAt") if "endedAt" in payload else payload.get("ended_at"),
+        base_ended_at,
     )
     properties = (
         list_value(payload.get("properties")) if "properties" in payload else base_properties
@@ -1904,6 +1915,7 @@ def apply_node_annotation(
             "annotation": payload,
             "annotation_revision": annotation.revision,
             "created_at": created_at,
+            "ended_at": ended_at,
             "imageUrl": image_url,
             "properties": properties,
             "position3d": position_3d,
@@ -2183,7 +2195,7 @@ def validate_identifier(value: str, field_name: str) -> None:
 def validate_annotation_payload(element_kind: str, payload: dict[str, object]) -> None:
     allowed = {"label", "properties"}
     if element_kind == "node":
-        allowed.update({"shape", "imageUrl", "createdAt", "position", "position3d"})
+        allowed.update({"shape", "imageUrl", "createdAt", "endedAt", "position", "position3d"})
     else:
         allowed.add("edgeType")
     unknown = set(payload) - allowed
@@ -2195,6 +2207,7 @@ def validate_annotation_payload(element_kind: str, payload: dict[str, object]) -
         raise ValueError("Указана неподдерживаемая форма узла.")
     validate_image_value(payload.get("imageUrl"))
     validate_properties(payload.get("properties", []))
+    validate_temporal_interval(payload.get("createdAt"), payload.get("endedAt"))
     validate_coordinates(payload.get("position"), axes=("x", "y"), field_name="position")
     validate_coordinates(
         payload.get("position3d"),
@@ -2210,6 +2223,25 @@ def validate_image_value(value: object) -> None:
         raise ValueError("Некорректное изображение или превышен лимит 1 МБ.")
     if value and not is_allowed_image_value(value):
         raise ValueError("Изображение должно быть HTTP(S)-URL или data:image.")
+
+
+def validate_temporal_interval(created_at: object, ended_at: object) -> None:
+    parsed: dict[str, datetime] = {}
+    for field, value in (("createdAt", created_at), ("endedAt", ended_at)):
+        if value is None or value == "":
+            continue
+        if not isinstance(value, str) or len(value) > 64:
+            raise ValueError(f"{field} должен быть строкой даты ISO 8601.")
+        timestamp = parse_datetime(value)
+        if timestamp is None:
+            raise ValueError(f"{field} должен содержать дату ISO 8601.")
+        parsed[field] = timestamp
+    if (
+        parsed.get("createdAt")
+        and parsed.get("endedAt")
+        and parsed["endedAt"] < parsed["createdAt"]
+    ):
+        raise ValueError("endedAt не может быть раньше createdAt.")
 
 
 def validate_properties(properties: object) -> None:

@@ -10,6 +10,7 @@ export type SemanticNode = {
   label: string;
   nodeType: string;
   createdAt: string;
+  endedAt: string;
   properties: GraphProperty[];
   raw: Record<string, unknown>;
 };
@@ -29,6 +30,8 @@ export type NodeMetadata = AttributeFilters & {
   source: string;
   planned: string;
   actual: string;
+  createdAt: string;
+  endedAt: string;
 };
 
 export type AttributeOptions = Record<keyof AttributeFilters, string[]>;
@@ -73,6 +76,8 @@ const FIELD_ALIASES: Record<keyof NodeMetadata, string[]> = {
     'факт',
     'фактическоезначение',
   ],
+  createdAt: ['created_at', 'createdat', 'started_at', 'start_date', 'начало', 'датаначала'],
+  endedAt: ['ended_at', 'endedat', 'finished_at', 'end_date', 'окончание', 'датаокончания'],
 };
 
 export function nodeMetadata(node: SemanticNode): NodeMetadata {
@@ -91,7 +96,9 @@ export function nodeMetadata(node: SemanticNode): NodeMetadata {
     propertyValues,
     rawValues,
   );
-  const year = field('year') || yearFromDate(node.createdAt);
+  const createdAt = field('createdAt') || node.createdAt;
+  const endedAt = field('endedAt') || node.endedAt;
+  const year = field('year') || yearFromDate(createdAt);
   const organization = field('organization')
     || (node.nodeType === 'organization' ? node.label.trim() : '');
   return {
@@ -103,6 +110,8 @@ export function nodeMetadata(node: SemanticNode): NodeMetadata {
     source: field('source'),
     planned: field('planned'),
     actual: field('actual'),
+    createdAt,
+    endedAt,
   };
 }
 
@@ -112,15 +121,16 @@ export function attributeOptions(nodes: SemanticNode[]): AttributeOptions {
     status: uniqueValues(metadata.map((item) => item.status)),
     region: uniqueValues(metadata.map((item) => item.region)),
     organization: uniqueValues(metadata.map((item) => item.organization)),
-    year: uniqueValues(metadata.map((item) => item.year)),
+    year: uniqueValues(metadata.flatMap(validityYears)),
   };
 }
 
 export function matchesAttributeFilters(node: SemanticNode, filters: AttributeFilters): boolean {
   const metadata = nodeMetadata(node);
-  return (Object.keys(filters) as Array<keyof AttributeFilters>).every(
-    (field) => !filters[field] || metadata[field] === filters[field],
-  );
+  return (!filters.status || metadata.status === filters.status)
+    && (!filters.region || metadata.region === filters.region)
+    && (!filters.organization || metadata.organization === filters.organization)
+    && (!filters.year || validityYears(metadata).includes(filters.year));
 }
 
 export function hierarchyLevels(
@@ -238,6 +248,24 @@ function firstAliasValue(
 function yearFromDate(value: string): string {
   const match = value.match(/(?:^|\D)((?:19|20)\d{2})(?:\D|$)/);
   return match?.[1] || '';
+}
+
+function validityYears(metadata: NodeMetadata): string[] {
+  const values = new Set(metadata.year ? [metadata.year] : []);
+  const start = Number(yearFromDate(metadata.createdAt));
+  const end = Number(yearFromDate(metadata.endedAt));
+  if (start) {
+    values.add(String(start));
+  }
+  if (end) {
+    values.add(String(end));
+  }
+  if (start && end && end >= start && end - start <= 200) {
+    for (let year = start; year <= end; year += 1) {
+      values.add(String(year));
+    }
+  }
+  return [...values];
 }
 
 function uniqueValues(values: string[]): string[] {

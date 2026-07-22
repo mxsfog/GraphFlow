@@ -21,6 +21,9 @@ from electromotiv_pipeline.google_sheets import (
 )
 from electromotiv_pipeline.graph_api import (
     ApiAuth,
+    ApiNode,
+    GraphAnnotationRecord,
+    apply_node_annotation,
     empty_graph,
     is_authorized,
     list_node_occurrences,
@@ -339,6 +342,52 @@ def test_graph_api_validates_3d_position() -> None:
             "node",
             {"position3d": {"x": 1, "y": 2}},
         )
+
+
+def test_graph_api_validates_temporal_interval() -> None:
+    validate_annotation_payload(
+        "node",
+        {
+            "createdAt": "2026-01-01T00:00:00Z",
+            "endedAt": "2026-12-31T23:59:59Z",
+        },
+    )
+    with pytest.raises(ValueError, match="раньше"):
+        validate_annotation_payload(
+            "node",
+            {
+                "createdAt": "2026-12-31T23:59:59Z",
+                "endedAt": "2026-01-01T00:00:00Z",
+            },
+        )
+    with pytest.raises(ValueError, match="ISO 8601"):
+        validate_annotation_payload("node", {"endedAt": "завтра"})
+
+
+def test_graph_annotation_can_clear_temporal_interval() -> None:
+    node = ApiNode(
+        id="task",
+        label="Task",
+        type="task",
+        shape="rounded_rectangle",
+        position={"x": 0, "y": 0},
+        style={},
+        data={
+            "created_at": "2026-01-01T00:00:00Z",
+            "ended_at": "2026-12-31T23:59:59Z",
+        },
+    )
+    result = apply_node_annotation(
+        node,
+        GraphAnnotationRecord(
+            payload={"createdAt": "", "endedAt": ""},
+            revision=1,
+        ),
+        "flow",
+    )
+
+    assert result.data["created_at"] == ""
+    assert result.data["ended_at"] == ""
 
 
 def test_graph_api_empty_payload() -> None:

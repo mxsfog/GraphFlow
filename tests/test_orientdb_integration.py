@@ -125,6 +125,8 @@ def test_run_history_annotations_and_custom_graph() -> None:
                 "id": "a",
                 "label": "A",
                 "type": "task",
+                "created_at": "2026-01-01T00:00:00Z",
+                "ended_at": "2026-06-30T23:59:59Z",
                 "position3d": {"x": 12.5, "y": -4.0, "z": 33.0},
             },
             {"id": "b", "label": "B", "type": "result"},
@@ -137,6 +139,8 @@ def test_run_history_annotations_and_custom_graph() -> None:
     assert {node["id"] for node in graph["nodes"]} == {"a", "b"}
     node_a = next(node for node in graph["nodes"] if node["id"] == "a")
     assert node_a["data"]["position3d"] == {"x": 12.5, "y": -4.0, "z": 33.0}
+    assert str(node_a["data"]["created_at"]).startswith("2026-01-01")
+    assert str(node_a["data"]["ended_at"]).startswith("2026-06-30")
     assert graph["edges"][0]["source"] == "a"
     assert graph["edges"][0]["target"] == "b"
 
