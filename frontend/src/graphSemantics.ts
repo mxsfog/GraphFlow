@@ -22,6 +22,7 @@ export type AttributeFilters = {
   status: string;
   region: string;
   organization: string;
+  direction: string;
   year: string;
 };
 
@@ -40,10 +41,24 @@ export const EMPTY_ATTRIBUTE_FILTERS: AttributeFilters = {
   status: '',
   region: '',
   organization: '',
+  direction: '',
   year: '',
 };
 
-export const HIERARCHY_EDGE_TYPES = new Set(['contains', 'include', 'properties', 'todo']);
+export const HIERARCHY_EDGE_TYPES = new Set([
+  'contains',
+  'include',
+  'properties',
+  'todo',
+  'has_block',
+  'has_process',
+  'uses_technology',
+  'has_goal',
+  'has_indicator',
+  'has_activity',
+  'has_project',
+  'produces_result',
+]);
 
 const FIELD_ALIASES: Record<keyof NodeMetadata, string[]> = {
   status: ['status', 'статус'],
@@ -58,6 +73,7 @@ const FIELD_ALIASES: Record<keyof NodeMetadata, string[]> = {
     'исполнитель',
     'ответственный',
   ],
+  direction: ['direction', 'направление', 'map', 'карта'],
   year: ['year', 'год'],
   description: ['description', 'summary', 'reason', 'описание', 'обоснование'],
   source: ['source', 'url', 'domain', 'источник', 'ссылка'],
@@ -105,6 +121,7 @@ export function nodeMetadata(node: SemanticNode): NodeMetadata {
     status: field('status'),
     region: field('region'),
     organization,
+    direction: field('direction'),
     year,
     description: field('description'),
     source: field('source'),
@@ -121,6 +138,9 @@ export function attributeOptions(nodes: SemanticNode[]): AttributeOptions {
     status: uniqueValues(metadata.map((item) => item.status)),
     region: uniqueValues(metadata.map((item) => item.region)),
     organization: uniqueValues(metadata.map((item) => item.organization)),
+    direction: uniqueValues(
+      metadata.flatMap((item) => item.direction.split(';').map((value) => value.trim())),
+    ),
     year: uniqueValues(metadata.flatMap(validityYears)),
   };
 }
@@ -130,7 +150,56 @@ export function matchesAttributeFilters(node: SemanticNode, filters: AttributeFi
   return (!filters.status || metadata.status === filters.status)
     && (!filters.region || metadata.region === filters.region)
     && (!filters.organization || metadata.organization === filters.organization)
+    && (
+      !filters.direction
+      || metadata.direction
+        .split(';')
+        .map((value) => value.trim())
+        .includes(filters.direction)
+    )
     && (!filters.year || validityYears(metadata).includes(filters.year));
+}
+
+export type ReadinessPresentation = {
+  level: 'green' | 'orange' | 'red';
+  label: string;
+  background: string;
+  borderColor: string;
+};
+
+const READINESS_PRESENTATIONS: ReadinessPresentation[] = [
+  {
+    level: 'green',
+    label: 'Зелёный: применяется в РФ',
+    background: '#dcfce7',
+    borderColor: '#15803d',
+  },
+  {
+    level: 'orange',
+    label: 'Оранжевый: есть ограничения',
+    background: '#ffedd5',
+    borderColor: '#c2410c',
+  },
+  {
+    level: 'red',
+    label: 'Красный: отсутствует в РФ',
+    background: '#fee2e2',
+    borderColor: '#b91c1c',
+  },
+];
+
+export function readinessPresentation(status: string): ReadinessPresentation | null {
+  const normalized = status.toLocaleLowerCase().replaceAll('ё', 'е');
+  if (normalized.includes('красн') || /\bred\b/.test(normalized)) {
+    return READINESS_PRESENTATIONS[2];
+  }
+  if (normalized.includes('оранж') || /\borange\b/.test(normalized)) {
+    return READINESS_PRESENTATIONS[1];
+  }
+  if (normalized.includes('зелен') || /\bgreen\b/.test(normalized)) {
+    return READINESS_PRESENTATIONS[0];
+  }
+  return null;
 }
 
 export function hierarchyLevels(

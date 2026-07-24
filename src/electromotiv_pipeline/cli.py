@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import sys
+from collections import Counter
 from pathlib import Path
 
 from electromotiv_pipeline.config import DEFAULT_SCHEMA_PATH, build_config
@@ -24,6 +26,7 @@ COMMANDS = {
     "dashboard": "command_dashboard",
     "graph-api": "command_graph_api",
     "decompose-document": "command_decompose_document",
+    "import-technology-maps": "command_import_technology_maps",
 }
 
 
@@ -125,6 +128,45 @@ def build_parser() -> argparse.ArgumentParser:
         default=str(DEFAULT_SCHEMA_PATH),
         help="Путь к SQL-схеме.",
     )
+
+    technology_parser = subparsers.add_parser(
+        "import-technology-maps",
+        help="Построить интегрированный граф технологических карт и программ поддержки.",
+    )
+    add_common_config_args(technology_parser, include_query=False)
+    technology_parser.add_argument(
+        "--technology-file",
+        required=True,
+        help="DOCX с технологическими картами.",
+    )
+    technology_parser.add_argument(
+        "--plan-file",
+        required=True,
+        help="DOCX с единым планом достижения национальных целей.",
+    )
+    technology_parser.add_argument(
+        "--title",
+        default="Технологическое лидерство: технологии и программы поддержки",
+        help="Название графа.",
+    )
+    technology_parser.add_argument(
+        "--graph-id",
+        default="technology-leadership",
+        help="Стабильный идентификатор графа.",
+    )
+    technology_parser.add_argument("--model", default=None, help="Модель OpenRouter.")
+    technology_parser.add_argument(
+        "--program-extractor",
+        choices=("local", "openrouter"),
+        default="local",
+        help="Способ извлечения программ поддержки. По умолчанию данные не покидают компьютер.",
+    )
+    technology_parser.add_argument(
+        "--schema",
+        default=str(DEFAULT_SCHEMA_PATH),
+        help="Путь к SQL-схеме.",
+    )
+    technology_parser.set_defaults(output="outputs/technology_leadership_graph.json")
 
     return parser
 
@@ -314,6 +356,130 @@ def command_decompose_document(args: argparse.Namespace) -> None:
         },
         indent=2,
     )
+
+
+def command_import_technology_maps(args: argparse.Namespace) -> None:
+    from electromotiv_pipeline.docx_reader import read_docx
+    from electromotiv_pipeline.technology_graph import (
+        GraphBundle,
+        arrange_graph,
+        build_technology_maps,
+        normalize_bundle,
+        technology_catalog,
+    )
+
+    technology_path = Path(args.technology_file)
+    plan_path = Path(args.plan_file)
+    technology_document = read_docx(technology_path)
+    plan_document = read_docx(plan_path)
+    use_openrouter = args.program_extractor == "openrouter"
+    config = build_config_from_args(
+        args,
+        require_openrouter=use_openrouter,
+        require_orientdb=True,
+    )
+    client = OrientDBClient(
+        base_url=config.orientdb_url,
+        database=config.orientdb_database,
+        auth_header=config.orientdb_auth_header,
+    )
+    client.ensure_schema(Path(args.schema))
+
+    technology_graph = build_technology_maps(technology_document)
+    llm_response = ""
+    if use_openrouter:
+        from electromotiv_pipeline.technology_programs import (
+            build_program_graph_with_openrouter,
+        )
+
+        program_graph, llm_response = build_program_graph_with_openrouter(
+            document=plan_document,
+            technology_catalog=technology_catalog(technology_graph),
+            api_key=config.openrouter_api_key,
+            model=config.openrouter_model,
+        )
+        extractor = f"openrouter:{config.openrouter_model}"
+    else:
+        from electromotiv_pipeline.technology_programs_local import (
+            build_program_graph_locally,
+        )
+
+        program_graph = build_program_graph_locally(
+            document=plan_document,
+            technology_graph=technology_graph,
+        )
+        extractor = "local-rules-v1"
+    graph = arrange_graph(
+        normalize_bundle(
+            GraphBundle(
+                nodes=[*technology_graph.nodes, *program_graph.nodes],
+                edges=[*technology_graph.edges, *program_graph.edges],
+            )
+        )
+    )
+    client.save_graph_document(
+        graph_id=args.graph_id,
+        title=args.title,
+        source_type=f"docx:{extractor}",
+        nodes=graph.nodes,
+        edges=graph.edges,
+    )
+    output_path = Path(args.output)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    audit = {
+        "graph_id": args.graph_id,
+        "title": args.title,
+        "extractor": extractor,
+        "source_files": [
+            file_fingerprint(technology_path),
+            file_fingerprint(plan_path),
+        ],
+        "statistics": graph_statistics(graph.nodes, graph.edges),
+        "nodes": graph.nodes,
+        "edges": graph.edges,
+    }
+    if llm_response:
+        audit["llm_response_sha256"] = hashlib.sha256(llm_response.encode("utf-8")).hexdigest()
+    output_path.write_text(
+        json.dumps(audit, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    json_print(
+        {
+            "graph_id": args.graph_id,
+            "nodes": len(graph.nodes),
+            "edges": len(graph.edges),
+            "extractor": extractor,
+            "output": str(output_path),
+        },
+        indent=2,
+    )
+
+
+def file_fingerprint(path: Path) -> dict[str, object]:
+    with path.open("rb") as stream:
+        digest = hashlib.file_digest(stream, "sha256").hexdigest()
+    return {"name": path.name, "size": path.stat().st_size, "sha256": digest}
+
+
+def graph_statistics(
+    nodes: list[dict[str, object]],
+    edges: list[dict[str, object]],
+) -> dict[str, object]:
+    node_types = Counter(str(node.get("type") or "") for node in nodes)
+    edge_types = Counter(str(edge.get("type") or "") for edge in edges)
+    statuses = Counter()
+    for node in nodes:
+        for prop in node.get("properties", []):
+            if isinstance(prop, dict) and prop.get("key") == "status" and prop.get("value"):
+                statuses[str(prop["value"])] += 1
+    return {
+        "nodes": len(nodes),
+        "edges": len(edges),
+        "node_types": dict(sorted(node_types.items())),
+        "edge_types": dict(sorted(edge_types.items())),
+        "statuses": dict(sorted(statuses.items())),
+    }
 
 
 def graph_api_auth_from_args(args: argparse.Namespace, *, auth_class):

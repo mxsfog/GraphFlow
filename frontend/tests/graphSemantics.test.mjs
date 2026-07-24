@@ -7,6 +7,7 @@ import {
   hierarchyLevels,
   matchesAttributeFilters,
   nodeMetadata,
+  readinessPresentation,
 } from '../../.runtime/frontend-tests/src/graphSemantics.js';
 
 function node(id, properties = [], raw = {}, nodeType = 'task', createdAt = '', endedAt = '') {
@@ -47,10 +48,10 @@ test('фильтр по году учитывает весь период акт
 
   assert.deepEqual(attributeOptions([ranged]).year, ['2024', '2025', '2026']);
   assert.equal(matchesAttributeFilters(ranged, {
-    status: '', region: '', organization: '', year: '2025',
+    status: '', region: '', organization: '', direction: '', year: '2025',
   }), true);
   assert.equal(matchesAttributeFilters(ranged, {
-    status: '', region: '', organization: '', year: '2027',
+    status: '', region: '', organization: '', direction: '', year: '2027',
   }), false);
 });
 
@@ -62,11 +63,27 @@ test('атрибутные фильтры и опции используют е�
 
   assert.deepEqual(attributeOptions(nodes).status, ['active', 'done']);
   assert.equal(matchesAttributeFilters(nodes[0], {
-    status: 'done', region: '77', organization: '', year: '',
+    status: 'done', region: '77', organization: '', direction: '', year: '',
   }), true);
   assert.equal(matchesAttributeFilters(nodes[1], {
-    status: 'done', region: '', organization: '', year: '',
+    status: 'done', region: '', organization: '', direction: '', year: '',
   }), false);
+});
+
+test('фильтр направления учитывает узлы нескольких карт', () => {
+  const shared = node('shared', [{ key: 'direction', value: 'Роботы; Микросхемы' }]);
+
+  assert.deepEqual(attributeOptions([shared]).direction, ['Микросхемы', 'Роботы']);
+  assert.equal(matchesAttributeFilters(shared, {
+    status: '', region: '', organization: '', direction: 'Микросхемы', year: '',
+  }), true);
+});
+
+test('статус готовности преобразуется в фиксированную цветовую категорию', () => {
+  assert.equal(readinessPresentation('Зелёный')?.level, 'green');
+  assert.equal(readinessPresentation('Оранжевый: нужна адаптация')?.level, 'orange');
+  assert.equal(readinessPresentation('Красный')?.level, 'red');
+  assert.equal(readinessPresentation('В работе'), null);
 });
 
 test('уровни и сворачивание ветви обрабатывают циклы', () => {

@@ -6,6 +6,7 @@ import hmac
 import json
 import logging
 import math
+import re
 import threading
 import unicodedata
 import urllib.parse
@@ -73,6 +74,23 @@ EDGE_STYLES = {
     "todo": {"stroke": "#dc2626", "strokeWidth": 2.2, "strokeDasharray": "8 5"},
     "follow": {"stroke": "#2563eb", "strokeWidth": 2.4},
     "properties": {"stroke": "#0f766e", "strokeWidth": 2.0, "strokeDasharray": "3 4"},
+    "implements": {"stroke": "#7c3aed", "strokeWidth": 2.2},
+    "develops": {"stroke": "#0f766e", "strokeWidth": 2.2},
+    "make": {"stroke": "#15803d", "strokeWidth": 2.3},
+    "intersects_with": {
+        "stroke": "#c2410c",
+        "strokeWidth": 2.2,
+        "strokeDasharray": "6 4",
+    },
+    "supports": {"stroke": "#be185d", "strokeWidth": 2.4},
+    "has_block": {"stroke": "#334155", "strokeWidth": 2.2},
+    "has_process": {"stroke": "#0369a1", "strokeWidth": 2.1},
+    "uses_technology": {"stroke": "#0f766e", "strokeWidth": 2.1},
+    "has_goal": {"stroke": "#4338ca", "strokeWidth": 2.2},
+    "has_indicator": {"stroke": "#64748b", "strokeWidth": 2.0},
+    "has_activity": {"stroke": "#7c3aed", "strokeWidth": 2.1},
+    "has_project": {"stroke": "#0369a1", "strokeWidth": 2.1},
+    "produces_result": {"stroke": "#15803d", "strokeWidth": 2.2},
     "decision": {"stroke": "#ea580c", "strokeWidth": 2},
     "found": {"stroke": "#2563eb", "strokeWidth": 2.2},
     "request": {"stroke": "#2563eb", "strokeWidth": 2.2},
@@ -97,8 +115,22 @@ NODE_STYLE_PALETTE = {
     "storage": {"background": "#f1f5f9", "borderColor": "#475569"},
     "component": {"background": "#f5f3ff", "borderColor": "#7c3aed"},
     "class": {"background": "#ecfdf5", "borderColor": "#059669"},
+    "product": {"background": "#f8fafc", "borderColor": "#0f172a"},
+    "technology_block": {"background": "#ecfeff", "borderColor": "#0e7490"},
+    "technology": {"background": "#f8fafc", "borderColor": "#475569"},
+    "program": {"background": "#f1f5f9", "borderColor": "#334155"},
+    "program_goal": {"background": "#eef2ff", "borderColor": "#4338ca"},
+    "indicator": {"background": "#f8fafc", "borderColor": "#64748b"},
+    "activity": {"background": "#faf5ff", "borderColor": "#7e22ce"},
+    "project": {"background": "#eff6ff", "borderColor": "#0369a1"},
+    "expected_result": {"background": "#f0fdf4", "borderColor": "#15803d"},
 }
 DEFAULT_NODE_STYLE = {"background": "#ffffff", "borderColor": "#334155"}
+READINESS_STYLES = {
+    "green": {"background": "#dcfce7", "borderColor": "#15803d", "borderWidth": 3},
+    "orange": {"background": "#ffedd5", "borderColor": "#c2410c", "borderWidth": 3},
+    "red": {"background": "#fee2e2", "borderColor": "#b91c1c", "borderWidth": 3},
+}
 DEFAULT_RUN_LIMIT = 6
 MAX_REQUEST_BYTES = 2_000_000
 MAX_GRAPH_GROUPS = 100
@@ -766,6 +798,29 @@ def merge_style(
         **NODE_STYLE_PALETTE.get(node_type, DEFAULT_NODE_STYLE),
     }
     return {**base, **stored_style}
+
+
+def apply_readiness_style(
+    style: dict[str, object],
+    properties: list[object],
+) -> dict[str, object]:
+    status = ""
+    for item in properties:
+        if not isinstance(item, dict):
+            continue
+        key = str(item.get("key") or "").strip().casefold()
+        if key in {"status", "статус"}:
+            status = str(item.get("value") or "").strip().casefold().replace("ё", "е")
+            break
+    if "красн" in status or re.search(r"\bred\b", status):
+        level = "red"
+    elif "оранж" in status or re.search(r"\borange\b", status):
+        level = "orange"
+    elif "зелен" in status or re.search(r"\bgreen\b", status):
+        level = "green"
+    else:
+        return style
+    return {**style, **READINESS_STYLES[level]}
 
 
 def merge_edge_style(
@@ -1700,11 +1755,11 @@ def normalize_graph_view_state(value: object) -> dict[str, object]:
     ):
         raise ValueError("hidden_levels должен содержать неотрицательные целые числа.")
     filters = json_object(state.get("attribute_filters"))
-    if set(filters) - {"status", "region", "organization", "year"}:
+    if set(filters) - {"status", "region", "organization", "direction", "year"}:
         raise ValueError("attribute_filters содержит неизвестные поля.")
     normalized_filters = {
         field: str(filters.get(field) or "").strip()[:200]
-        for field in ("status", "region", "organization", "year")
+        for field in ("status", "region", "organization", "direction", "year")
     }
     viewport = json_object(state.get("viewport"))
     normalized_viewport: dict[str, float] = {}
@@ -1888,7 +1943,7 @@ def apply_node_annotation(
         "annotation_revision": 0,
     }
     if not annotation:
-        return replace(node, data=data)
+        return replace(node, style=apply_readiness_style(node.style, base_properties), data=data)
 
     payload = annotation.payload
     label = string_value(payload.get("label"), node.label)
@@ -1926,7 +1981,10 @@ def apply_node_annotation(
         label=label,
         shape=shape,
         position=position,
-        style=merge_style(stored_style={}, shape=shape, node_type=node.type, notation=notation),
+        style=apply_readiness_style(
+            merge_style(stored_style={}, shape=shape, node_type=node.type, notation=notation),
+            properties,
+        ),
         data=data,
     )
 

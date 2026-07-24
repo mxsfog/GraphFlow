@@ -6,6 +6,7 @@ const FILTER_LABELS: Record<keyof AttributeFilters, string> = {
   status: 'Статус',
   region: 'Регион',
   organization: 'Организация',
+  direction: 'Направление',
   year: 'Год',
 };
 

@@ -86,6 +86,7 @@ export type GraphViewState = {
     status: string;
     region: string;
     organization: string;
+    direction: string;
     year: string;
   };
   collapsed_branches: string[];

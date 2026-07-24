@@ -59,6 +59,7 @@ import {
   matchesAttributeFilters,
   metricValue,
   nodeMetadata,
+  readinessPresentation,
   type AttributeFilters,
   type AttributeOptions,
   type MetricMode,
@@ -228,12 +229,38 @@ const EDGE_TYPES = [
   'source',
   'contains',
   'reference',
+  'implements',
+  'develops',
+  'make',
+  'intersects_with',
+  'supports',
+  'has_block',
+  'has_process',
+  'uses_technology',
+  'has_goal',
+  'has_indicator',
+  'has_activity',
+  'has_project',
+  'produces_result',
 ];
 const EDGE_TYPE_STYLES: Record<string, CSSProperties> = {
   todo: { stroke: '#dc2626', strokeWidth: 2.4, strokeDasharray: '7 5' },
   follow: { stroke: '#2563eb', strokeWidth: 2.4 },
   include: { stroke: '#475569', strokeWidth: 2.1, strokeDasharray: '6 4' },
   properties: { stroke: '#0f766e', strokeWidth: 2.1, strokeDasharray: '3 4' },
+  implements: { stroke: '#7c3aed', strokeWidth: 2.2 },
+  develops: { stroke: '#0f766e', strokeWidth: 2.2 },
+  make: { stroke: '#15803d', strokeWidth: 2.3 },
+  intersects_with: { stroke: '#c2410c', strokeWidth: 2.2, strokeDasharray: '6 4' },
+  supports: { stroke: '#be185d', strokeWidth: 2.4 },
+  has_block: { stroke: '#334155', strokeWidth: 2.2 },
+  has_process: { stroke: '#0369a1', strokeWidth: 2.1 },
+  uses_technology: { stroke: '#0f766e', strokeWidth: 2.1 },
+  has_goal: { stroke: '#4338ca', strokeWidth: 2.2 },
+  has_indicator: { stroke: '#64748b', strokeWidth: 2.0 },
+  has_activity: { stroke: '#7c3aed', strokeWidth: 2.1 },
+  has_project: { stroke: '#0369a1', strokeWidth: 2.1 },
+  produces_result: { stroke: '#15803d', strokeWidth: 2.2 },
   decision: { stroke: '#ea580c', strokeWidth: 2.4 },
   request: { stroke: '#2563eb', strokeWidth: 2.2 },
   found: { stroke: '#0891b2', strokeWidth: 2.2 },
@@ -248,7 +275,31 @@ const EDGE_TYPE_STYLES: Record<string, CSSProperties> = {
 };
 const DEFAULT_EDGE_TYPE_STYLE: CSSProperties = { stroke: '#64748b', strokeWidth: 2.1 };
 const ANIMATED_EDGE_TYPES = new Set<string>();
-const CHILD_EDGE_TYPES = new Set(['contains', 'include', 'properties']);
+const CHILD_EDGE_TYPES = new Set([
+  'contains',
+  'include',
+  'properties',
+  'has_block',
+  'has_process',
+  'uses_technology',
+  'has_goal',
+  'has_indicator',
+  'has_activity',
+  'has_project',
+  'produces_result',
+]);
+const NODE_TYPE_LEGEND_COLORS: Record<string, string> = {
+  product: '#0f172a',
+  technology_block: '#0e7490',
+  process: '#2563eb',
+  technology: '#475569',
+  program: '#334155',
+  program_goal: '#4338ca',
+  indicator: '#64748b',
+  activity: '#7e22ce',
+  project: '#0369a1',
+  expected_result: '#15803d',
+};
 
 const nodeTypes = {
   notationNode: NotationNode,
@@ -503,6 +554,7 @@ export function GraphViewer({ apiBaseUrl }: GraphViewerProps) {
         imageUrl: node.data.imageUrl,
         sharedMapCount: node.data.sharedMapCount || 1,
         metric: node.data.metricValue || '',
+        color: String(effectiveNodeStyle(node.data).borderColor || '#64748b'),
         ...node.data.position3d,
       })),
     [visibleNodes],
@@ -522,7 +574,8 @@ export function GraphViewer({ apiBaseUrl }: GraphViewerProps) {
       .filter((node) => !node.id.startsWith('__'))
       .map((node) => ({
         type: node.data.nodeType,
-        color: String(node.data.style.borderColor || node.data.style.background || '#64748b'),
+        color: NODE_TYPE_LEGEND_COLORS[node.data.nodeType]
+          || String(node.data.style.borderColor || node.data.style.background || '#64748b'),
       })),
   ), [visibleNodes]);
   const edgeLegendEntries = useMemo<LegendEntry[]>(() => uniqueByType(
@@ -535,6 +588,14 @@ export function GraphViewer({ apiBaseUrl }: GraphViewerProps) {
       };
     }),
   ), [visibleEdges]);
+  const statusLegendEntries = useMemo<LegendEntry[]>(() => uniqueByType(
+    visibleNodes.flatMap((node) => {
+      const presentation = readinessPresentation(editablePropertyValue(node.data.properties, 'status'));
+      return presentation
+        ? [{ type: presentation.label, color: presentation.background }]
+        : [];
+    }),
+  ), [visibleNodes]);
 
   useEffect(() => {
     window.localStorage.setItem('graphflow-background', invertedBackground ? 'dark' : 'light');
@@ -957,21 +1018,24 @@ export function GraphViewer({ apiBaseUrl }: GraphViewerProps) {
     const exportNodeIds = new Set(exportNodes.map((node) => node.id));
     return {
       title: payload?.title || 'GraphFlow',
-      nodes: exportNodes.map((node) => ({
-        id: node.id,
-        label: node.data.label,
-        nodeType: node.data.nodeType,
-        shape: node.data.shape,
-        position: node.position,
-        width: node.measured?.width,
-        height: node.measured?.height,
-        fill: String(node.data.style.background || '#ffffff'),
-        stroke: String(node.data.style.borderColor || '#334155'),
-        metric: node.data.metricValue
-          ? `${metricMode === 'planned' ? 'План' : 'Факт'}: ${node.data.metricValue}`
-          : '',
-        sharedMapCount: node.data.sharedMapCount,
-      })),
+      nodes: exportNodes.map((node) => {
+        const style = effectiveNodeStyle(node.data);
+        return {
+          id: node.id,
+          label: node.data.label,
+          nodeType: node.data.nodeType,
+          shape: node.data.shape,
+          position: node.position,
+          width: node.measured?.width,
+          height: node.measured?.height,
+          fill: String(style.background || '#ffffff'),
+          stroke: String(style.borderColor || '#334155'),
+          metric: node.data.metricValue
+            ? `${metricMode === 'planned' ? 'План' : 'Факт'}: ${node.data.metricValue}`
+            : '',
+          sharedMapCount: node.data.sharedMapCount,
+        };
+      }),
       edges: visibleEdges
         .filter((edge) => exportNodeIds.has(edge.source) && exportNodeIds.has(edge.target))
         .map((edge) => {
@@ -1808,6 +1872,7 @@ export function GraphViewer({ apiBaseUrl }: GraphViewerProps) {
             <GraphLegend
               nodeEntries={nodeLegendEntries}
               edgeEntries={edgeLegendEntries}
+              statusEntries={statusLegendEntries}
               hasSharedNodes={visibleNodes.some((node) => (node.data.sharedMapCount || 1) > 1)}
             />
           </section>
@@ -2848,7 +2913,7 @@ function NotationNode({ data }: { data: NotationNodeData }) {
   const validity = validityPeriodLabel(data.createdAt, data.endedAt);
 
   return (
-    <div className={className} style={nodeInlineStyle(data.style)}>
+    <div className={className} style={nodeInlineStyle(effectiveNodeStyle(data))}>
       <NodeHandles />
       {data.hasBranch ? (
         <button
@@ -3029,6 +3094,24 @@ function NodeProperties({ properties }: { properties: EditableProperty[] }) {
         ))}
     </div>
   );
+}
+
+function effectiveNodeStyle(data: NotationNodeData): Record<string, string | number> {
+  const readiness = readinessPresentation(editablePropertyValue(data.properties, 'status'));
+  return readiness
+    ? {
+        ...data.style,
+        background: readiness.background,
+        borderColor: readiness.borderColor,
+        borderWidth: 3,
+      }
+    : data.style;
+}
+
+function editablePropertyValue(properties: EditableProperty[], key: string): string {
+  const normalizedKey = key.toLocaleLowerCase();
+  return properties.find((property) => property.key.toLocaleLowerCase() === normalizedKey)?.value
+    || '';
 }
 
 function nodeInlineStyle(style: Record<string, string | number>): CSSProperties {

@@ -30,6 +30,7 @@ export type Graph3DNode = Position3D & {
   imageUrl: string;
   sharedMapCount: number;
   metric: string;
+  color: string;
 };
 
 export type Graph3DLink = {
@@ -67,6 +68,15 @@ const NODE_COLORS: Record<string, string> = {
   task: '#0ea5e9',
   milestone: '#f59e0b',
   result: '#2dd4bf',
+  product: '#0f172a',
+  technology_block: '#0e7490',
+  technology: '#475569',
+  program: '#334155',
+  program_goal: '#4338ca',
+  indicator: '#64748b',
+  activity: '#7e22ce',
+  project: '#0369a1',
+  expected_result: '#15803d',
 };
 const LINK_COLORS: Record<string, string> = {
   todo: '#ef4444',
@@ -78,6 +88,19 @@ const LINK_COLORS: Record<string, string> = {
   about: '#34d399',
   score: '#34d399',
   contains: '#34d399',
+  implements: '#a78bfa',
+  develops: '#2dd4bf',
+  make: '#4ade80',
+  intersects_with: '#fb923c',
+  supports: '#f472b6',
+  has_block: '#94a3b8',
+  has_process: '#38bdf8',
+  uses_technology: '#2dd4bf',
+  has_goal: '#818cf8',
+  has_indicator: '#94a3b8',
+  has_activity: '#c084fc',
+  has_project: '#38bdf8',
+  produces_result: '#4ade80',
 };
 const BOX_SHAPES = new Set(['component', 'class', 'document']);
 const LARGE_NODE_TYPES = new Set(['actor', 'storage', 'model']);
@@ -127,9 +150,9 @@ export default function Graph3DView({
   }, []);
 
   useEffect(() => {
-    const timer = window.setTimeout(() => graphRef.current?.zoomToFit(450, 24), 200);
+    const timer = window.setTimeout(() => frameGraph(graphRef.current, nodes), 200);
     return () => window.clearTimeout(timer);
-  }, [graphData, size.height, size.width]);
+  }, [graphData, nodes, size.height, size.width]);
 
   function focusNode(node: NodeObject<Graph3DNode>) {
     const position = spatialPosition(node);
@@ -177,6 +200,7 @@ export default function Graph3DView({
           node.nodeType,
           String(node.id) === selectedNodeId,
           node.sharedMapCount > 1,
+          node.color,
         )}
         linkLabel={(link) => tooltip(link.label || link.edgeType, link.edgeType)}
         linkColor={(link) =>
@@ -199,7 +223,7 @@ export default function Graph3DView({
         onBackgroundClick={onClearSelection}
       />
       <div className="graph-3d-actions">
-        <button type="button" onClick={() => graphRef.current?.zoomToFit(450, 24)}>
+        <button type="button" onClick={() => frameGraph(graphRef.current, nodes)}>
           Весь граф
         </button>
       </div>
@@ -207,12 +231,59 @@ export default function Graph3DView({
   );
 }
 
+function frameGraph(
+  graph: ForceGraphMethods<Graph3DNode, Graph3DLink> | undefined,
+  nodes: Graph3DNode[],
+): void {
+  if (!graph || nodes.length === 0) {
+    return;
+  }
+  const bounds = nodes.reduce(
+    (result, node) => ({
+      minX: Math.min(result.minX, node.x),
+      maxX: Math.max(result.maxX, node.x),
+      minY: Math.min(result.minY, node.y),
+      maxY: Math.max(result.maxY, node.y),
+      minZ: Math.min(result.minZ, node.z),
+      maxZ: Math.max(result.maxZ, node.z),
+    }),
+    {
+      minX: Number.POSITIVE_INFINITY,
+      maxX: Number.NEGATIVE_INFINITY,
+      minY: Number.POSITIVE_INFINITY,
+      maxY: Number.NEGATIVE_INFINITY,
+      minZ: Number.POSITIVE_INFINITY,
+      maxZ: Number.NEGATIVE_INFINITY,
+    },
+  );
+  const center = {
+    x: (bounds.minX + bounds.maxX) / 2,
+    y: (bounds.minY + bounds.maxY) / 2,
+    z: (bounds.minZ + bounds.maxZ) / 2,
+  };
+  const span = Math.max(
+    bounds.maxX - bounds.minX,
+    bounds.maxY - bounds.minY,
+    bounds.maxZ - bounds.minZ,
+  );
+  const distance = Math.max(320, span * 1.2);
+  graph.cameraPosition(
+    {
+      x: center.x + distance * 0.32,
+      y: center.y + distance * 0.18,
+      z: center.z + distance,
+    },
+    center,
+    450,
+  );
+}
+
 function createNodeObject(node: NodeObject<Graph3DNode>, selected: boolean): Group {
   const shared = node.sharedMapCount > 1;
-  const color = nodeColor(node.nodeType, selected, shared);
+  const color = nodeColor(node.nodeType, selected, shared, node.color);
   const material = new MeshStandardMaterial({
     color,
-    emissive: selected || shared ? color : '#000000',
+    emissive: selected ? color : shared ? '#ec4899' : '#000000',
     emissiveIntensity: selected ? 0.24 : shared ? 0.12 : 0,
     metalness: node.nodeType === 'storage' ? 0.5 : 0.12,
     roughness: 0.48,
@@ -290,11 +361,16 @@ function imageSprite(imageUrl: string): Sprite {
   return sprite;
 }
 
-function nodeColor(nodeType: string, selected: boolean, shared = false): string {
+function nodeColor(
+  nodeType: string,
+  selected: boolean,
+  shared = false,
+  customColor = '',
+): string {
   if (selected) {
     return '#facc15';
   }
-  return shared ? '#ec4899' : NODE_COLORS[nodeType] || '#60a5fa';
+  return customColor || (shared ? '#ec4899' : NODE_COLORS[nodeType] || '#60a5fa');
 }
 
 function linkColor(edgeType: string, selected: boolean, invertedBackground: boolean): string {

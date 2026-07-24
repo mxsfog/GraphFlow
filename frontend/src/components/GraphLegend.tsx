@@ -7,14 +7,16 @@ export type LegendEntry = {
 export function GraphLegend({
   nodeEntries,
   edgeEntries,
+  statusEntries,
   hasSharedNodes,
 }: {
   nodeEntries: LegendEntry[];
   edgeEntries: LegendEntry[];
+  statusEntries: LegendEntry[];
   hasSharedNodes: boolean;
 }) {
   return (
-    <details className="graph-legend" open>
+    <details className="graph-legend">
       <summary>Легенда</summary>
       <div className="legend-columns">
         <section>
@@ -41,6 +43,20 @@ export function GraphLegend({
             </span>
           ))}
         </section>
+        {statusEntries.length > 0 ? (
+          <section>
+            <strong>Готовность</strong>
+            {statusEntries.map((entry) => (
+              <span key={entry.type}>
+                <i
+                  className="legend-node-swatch"
+                  style={{ background: entry.color }}
+                />
+                {entry.type}
+              </span>
+            ))}
+          </section>
+        ) : null}
       </div>
     </details>
   );
