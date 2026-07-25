@@ -1,0 +1,322 @@
+{
+  "schema_version": 1,
+  "profile_id": "technology-leadership-v2",
+  "status_order": ["", "План", "Действует", "Зелёный", "Оранжевый", "Красный"],
+  "node_shapes": {
+    "product": "component",
+    "technology_block": "rounded_rectangle",
+    "process": "rounded_rectangle",
+    "technology": "rounded_rectangle",
+    "program": "component",
+    "program_goal": "ellipse",
+    "indicator": "document",
+    "activity": "rounded_rectangle",
+    "project": "component",
+    "expected_result": "document"
+  },
+  "document_rules": [
+    {
+      "role": "technology_maps",
+      "mode": "table_hierarchy",
+      "required": true,
+      "match": {
+        "required_table_headers": [
+          "Блок",
+          "Процесс создания",
+          "Технологии создания",
+          "Готовность",
+          "Обоснование",
+          "Источники"
+        ]
+      },
+      "table_rules": [
+        {
+          "id": "technology-map",
+          "required_headers": [
+            "Блок",
+            "Процесс создания",
+            "Технологии создания",
+            "Готовность",
+            "Обоснование",
+            "Источники"
+          ],
+          "root": {
+            "type": "product",
+            "label_from": "after_colon",
+            "direction_from": "before_colon",
+            "description_prefix": "Конкретная цель:",
+            "direction_aliases": [
+              {"pattern": "робот", "value": "Роботы"},
+              {"pattern": "аккумулятор|батаре", "value": "Аккумуляторы"},
+              {"pattern": "микросхем|контроллер|soc", "value": "Микросхемы"}
+            ],
+            "id_by_direction": {
+              "Роботы": "product:robots",
+              "Аккумуляторы": "product:batteries",
+              "Микросхемы": "product:microchips"
+            },
+            "topics_by_direction": {
+              "Роботы": ["robots"],
+              "Аккумуляторы": ["batteries"],
+              "Микросхемы": ["microchips"]
+            }
+          },
+          "levels": [
+            {
+              "column": "Блок",
+              "type": "technology_block",
+              "edge_type": "has_block",
+              "edge_label": "включает блок",
+              "transform": "before_slash",
+              "deduplicate": "parent"
+            },
+            {
+              "column": "Процесс создания",
+              "type": "process",
+              "edge_type": "has_process",
+              "edge_label": "включает процесс",
+              "deduplicate": "parent"
+            },
+            {
+              "column": "Технологии создания",
+              "type": "technology",
+              "edge_type": "uses_technology",
+              "edge_label": "использует технологию",
+              "split": ";",
+              "deduplicate": "global"
+            }
+          ],
+          "property_columns": {
+            "status": "Готовность",
+            "description": "Обоснование",
+            "source": "Источники"
+          },
+          "skip_rows": [
+            {"column": "Блок", "equals": "Продукт"},
+            {"column": "Блок", "equals": "Целевой продукт"}
+          ]
+        }
+      ]
+    },
+    {
+      "role": "support_programs",
+      "mode": "section_hierarchy",
+      "required": true,
+      "match": {
+        "required_paragraph_patterns": [
+          "^6\\.1\\.4\\. Обеспечение технологической независимости",
+          "^6\\.3\\. Обеспечение к 2030 году"
+        ]
+      },
+      "groups": [
+        {
+          "id": "program:bas",
+          "label": "Федеральный проект БАС",
+          "type": "program",
+          "direction": "Федеральный проект БАС",
+          "description": "Программа поддержки беспилотных авиационных систем.",
+          "status": "План",
+          "end_date": "2030-12-31",
+          "topics": ["robots"],
+          "section_type": "program_goal",
+          "sections": [
+            {
+              "start": "^6\\.1\\.4\\. Обеспечение технологической независимости",
+              "end": "^6\\.1\\.5\\.",
+              "type": "program_goal",
+              "edge_type": "has_goal",
+              "edge_label": "включает цель"
+            }
+          ],
+          "node_rules": [
+            {
+              "id": "bas-indicator",
+              "pattern": "^6\\.1\\.4\\. Достигнутый уровень",
+              "type": "indicator",
+              "parent": "section",
+              "label_transform": "strip_section",
+              "edge_type": "has_indicator",
+              "edge_label": "измеряется показателем",
+              "deduplicate": "group"
+            },
+            {
+              "id": "bas-result",
+              "pattern": "^(Результатами достижения|Для обеспечения технологической)",
+              "type": "expected_result",
+              "parent": "section",
+              "edge_type": "produces_result",
+              "edge_label": "ожидаемый результат",
+              "deduplicate": "group"
+            },
+            {
+              "id": "bas-activity",
+              "pattern": "^(Стимулирование спроса|Разработка, стандартизация|Развитие инфраструктуры|Формирование кадрового потенциала|Разработка перспективных технологий)",
+              "type": "activity",
+              "parent": "section",
+              "deduplicate": "group",
+              "sequence": true,
+              "edges": [
+                {"from": "parent", "type": "has_activity", "label": "включает мероприятие"},
+                {"from": "group", "type": "implements", "label": "реализует"}
+              ]
+            },
+            {
+              "id": "bas-project",
+              "pattern": "^[-–—]\\s+",
+              "type": "project",
+              "parent": "last:activity",
+              "label_transform": "strip_bullet",
+              "deduplicate": "group",
+              "edges": [
+                {"from": "parent", "type": "has_project", "label": "включает проект"},
+                {"from": "parent", "type": "todo", "label": "к реализации"}
+              ]
+            }
+          ],
+          "range_rules": []
+        },
+        {
+          "id": "program:science",
+          "label": "Госпрограмма «Наука»",
+          "type": "program",
+          "direction": "Госпрограмма «Наука»",
+          "description": "Государственная программа научно-технологического развития.",
+          "status": "План",
+          "end_date": "2030-12-31",
+          "topics": ["robots", "batteries", "microchips"],
+          "section_type": "program_goal",
+          "sections": [
+            {
+              "start": "^6\\.3\\. Обеспечение к 2030 году",
+              "end": "^6\\.4\\. Увеличение к 2030 году внутренних затрат",
+              "type": "program_goal",
+              "edge_type": "has_goal",
+              "edge_label": "включает цель"
+            },
+            {
+              "start": "^6\\.4\\. Увеличение к 2030 году внутренних затрат",
+              "end": "^6\\.5\\.",
+              "type": "program_goal",
+              "edge_type": "has_goal",
+              "edge_label": "включает цель"
+            }
+          ],
+          "node_rules": [
+            {
+              "id": "science-indicator",
+              "pattern": "^6\\.(3|4)\\.(?:[а-яё]\\.)?\\s*(Место|Внутренние затраты|Удельный вес)",
+              "type": "indicator",
+              "parent": "section",
+              "label_transform": "strip_section",
+              "edge_type": "has_indicator",
+              "edge_label": "измеряется показателем",
+              "deduplicate": "group"
+            }
+          ],
+          "range_rules": [
+            {
+              "id": "science-activity",
+              "start": "^Ключевыми факторами и инструментами",
+              "end": "^Подробнее факторы и инструменты",
+              "type": "activity",
+              "parent": "section",
+              "deduplicate": "global",
+              "sequence": true,
+              "edges": [
+                {"from": "parent", "type": "has_activity", "label": "включает мероприятие"},
+                {"from": "group", "type": "implements", "label": "реализует"}
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "topics": {
+    "robots": ["робот", "беспилот", "БАС", "AMR", "автоном", "навигац", "лидар"],
+    "batteries": ["аккумулятор", "батаре", "накоплен", "ячейк", "BMS", "LiFePO4", "LTO"],
+    "microchips": ["микросхем", "контроллер", "полупровод", "электронн", "SoC", "литограф"]
+  },
+  "cross_links": [
+    {
+      "edge_type": "supports",
+      "label": "поддерживает направление",
+      "strategy": "topics",
+      "source_types": ["program"],
+      "target_types": ["product"],
+      "minimum_score": 1,
+      "max_per_source": 3,
+      "max_total": 6
+    },
+    {
+      "edge_type": "supports",
+      "label": "поддерживает направление",
+      "strategy": "topics",
+      "source_types": ["activity", "project"],
+      "target_types": ["product"],
+      "minimum_score": 1,
+      "max_per_source": 2,
+      "max_total": 20
+    },
+    {
+      "edge_type": "develops",
+      "label": "развивает технологию",
+      "strategy": "topics",
+      "source_types": ["activity", "project"],
+      "target_types": ["technology"],
+      "minimum_score": 1,
+      "max_per_source": 2,
+      "max_total": 24
+    },
+    {
+      "edge_type": "intersects_with",
+      "label": "пересекается",
+      "strategy": "topics",
+      "source_types": ["program"],
+      "target_types": ["program"],
+      "minimum_score": 1,
+      "max_per_source": 1,
+      "max_total": 1,
+      "different_direction": true,
+      "symmetric": true
+    },
+    {
+      "edge_type": "make",
+      "label": "создаёт результат",
+      "strategy": "topics",
+      "source_types": ["project"],
+      "target_types": ["expected_result"],
+      "minimum_score": 1,
+      "max_per_source": 1,
+      "max_total": 1
+    },
+    {
+      "edge_type": "intersects_with",
+      "label": "пересекается",
+      "strategy": "tokens",
+      "source_types": ["technology"],
+      "target_types": ["technology"],
+      "minimum_score": 2,
+      "max_per_source": 2,
+      "max_total": 24,
+      "different_direction": true,
+      "symmetric": true
+    }
+  ],
+  "token_stop_words": [
+    "автоматизированный",
+    "выполнение",
+    "изготовление",
+    "использование",
+    "контроль",
+    "обеспечение",
+    "обработка",
+    "операция",
+    "производство",
+    "разработка",
+    "система",
+    "создание",
+    "технология",
+    "устройство"
+  ]
+}

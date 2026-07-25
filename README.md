@@ -1,4 +1,4 @@
-# ElectroMotiv
+# GraphFlow
 
 Проект производственной практики: обработка документов и новостей, построение графовых моделей, хранение в OrientDB, экспорт в Google Sheets и интерактивная визуализация.
 
@@ -7,7 +7,7 @@
 ```text
 Google News RSS -> Python -> OpenRouter -> OrientDB -> Graph API -> React Flow
                                       \-> Google Sheets
-DOCX -> Python parser -> OrientDB -> Graph API -> React Flow / Three.js
+DOCX -> OOXML reader -> universal import profile -> OrientDB -> Graph API -> React Flow / Three.js
 ```
 
 n8n в текущую архитектуру не входит.
@@ -17,6 +17,7 @@ n8n в текущую архитектуру не входит.
 - `src/electromotiv_pipeline` - Python-пайплайн, Graph API и HTML-панель;
 - `frontend` - React 19 и React Flow;
 - `orientdb/schema.sql` - вершины, ребра и индексы OrientDB;
+- `profiles` - декларативные профили отображения документов в граф;
 - `infra/docker-compose.yml` - закрепленный образ OrientDB;
 - `tests` - модульные и интеграционные тесты;
 - `.github/workflows/ci.yml` - CI для Python, frontend и OrientDB.
@@ -170,9 +171,44 @@ PYTHONPATH=src .venv/bin/python -m electromotiv_pipeline decompose-document \
 
 Команда применяет схему автоматически. Текст отправляется во внешний API только после явного запуска команды.
 
-## Импорт технологических карт
+## Универсальный импорт DOCX
 
-Команда объединяет технологические карты и разделы единого плана в один граф:
+Основная команда принимает любое количество DOCX. Без профиля она сохраняет структуру
+документа: документ, разделы, абзацы, списки, таблицы и строки таблиц.
+
+```bash
+PYTHONPATH=src .venv/bin/python -m electromotiv_pipeline import-documents \
+  --file "/path/to/document-1.docx" \
+  --file "/path/to/document-2.docx" \
+  --graph-id document-graph \
+  --title "Граф документов" \
+  --output outputs/document_graph.json
+```
+
+Предметная семантика задается JSON-профилем:
+
+```bash
+PYTHONPATH=src .venv/bin/python -m electromotiv_pipeline import-documents \
+  --file "/path/to/technology-maps.docx" \
+  --file "/path/to/support-programs.docx" \
+  --profile profiles/technology_leadership.json \
+  --graph-id technology-leadership \
+  --title "Технологическое лидерство" \
+  --output outputs/technology_leadership_graph.json
+```
+
+Профиль определяет критерии распознавания документов, иерархии таблиц, правила разделов,
+типы узлов и ребер, тематические словари и междокументные связи. Файлы назначаются ролям по
+содержимому, а не по имени или позиции аргумента. Для нового формата создается новый профиль;
+изменение Python-кода не требуется.
+
+Тема направления задается профилем отдельно от слов, автоматически найденных в названии.
+Это исключает ложное назначение батареи направлению «Роботы» только из-за словосочетания
+«для робототехники». Автоматически созданные связи содержат формальное основание совпадения.
+
+## Профиль технологического лидерства
+
+Совместимая команда использует тот же универсальный движок с готовым профилем:
 
 ```bash
 TECHNOLOGY_FILE="/path/to/Технологические_карты.docx"
@@ -181,15 +217,15 @@ PLAN_FILE="/path/to/Единый_план.docx"
 PYTHONPATH=src .venv/bin/python -m electromotiv_pipeline import-technology-maps \
   --technology-file "$TECHNOLOGY_FILE" \
   --plan-file "$PLAN_FILE" \
+  --profile profiles/technology_leadership.json \
   --graph-id technology-leadership \
   --title "Технологическое лидерство" \
   --output outputs/technology_leadership_graph.json
 ```
 
-Таблицы по роботам, аккумуляторам и микросхемам разбираются локальным DOCX-парсером. Из
-единого плана выбираются разделы 6.1.4, 6.3 и 6.4. Детерминированные правила выделяют цели,
-показатели, мероприятия, проекты и ожидаемые результаты, объединяют повторяющиеся элементы
-и формируют межкарточные связи. Данные не покидают компьютер.
+DOCX читается локально как OOXML. Профиль сопоставляет таблицы по названиям колонок, а
+программные разделы - по настраиваемым выражениям. Индексы таблиц, имена файлов и конкретные
+позиции абзацев в Python-коде не используются. Данные не покидают компьютер.
 
 Иерархия технологий: `product -> technology_block -> process -> technology`. Иерархия
 программ: `program -> program_goal -> indicator/activity -> project -> expected_result`.
@@ -202,9 +238,9 @@ PYTHONPATH=src .venv/bin/python -m electromotiv_pipeline import-technology-maps 
 системы». В интерфейсе они сгруппированы под краткими названиями «Госпрограмма „Наука“» и
 «Федеральный проект БАС».
 
-Режим `--program-extractor openrouter` предусмотрен для внешней LLM, но передает выбранные
-фрагменты документов стороннему API и не должен применяться к закрытым данным. Локальный
-режим используется по умолчанию.
+Междокументные `supports`, `develops` и `intersects_with` создаются по тематическим словарям
+и лексическому пересечению, заданным в профиле. Основание и оценка совпадения сохраняются в
+properties ребра. Эти связи требуют предметной проверки.
 
 ## Проверки
 
@@ -225,6 +261,8 @@ CI выполняет эти проверки на Python 3.14 и Node.js 22 с 
 
 - Google News RSS остается демонстрационным источником и не гарантирует полноту выдачи.
 - Basic Auth безопасен только на loopback без TLS; Graph API запрещает внешний bind.
+- Автоматический режим универсален структурно, но не выполняет универсальное семантическое
+  понимание текста. Предметные типы и связи требуют профиля или отдельно запущенной LLM.
 - Docker Compose хранит данные OrientDB в `.runtime` на D, но размещение слоев Docker image определяется настройками Docker daemon.
 - 3D-модуль загружается отдельным chunk размером около 373 КБ gzip только после переключения в 3D.
 

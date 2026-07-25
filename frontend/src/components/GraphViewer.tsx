@@ -2942,7 +2942,6 @@ function NotationNode({ data }: { data: NotationNodeData }) {
           <div className="node-label">{data.label}</div>
           {data.shape !== 'class' ? <div className="node-meta">{meta}</div> : null}
           {data.shape === 'class' ? <ClassSections raw={data.raw} /> : null}
-          {data.properties.length > 0 ? <NodeProperties properties={data.properties} /> : null}
           {validity ? <div className="node-time">{validity}</div> : null}
         </div>
       ) : null}
@@ -3079,20 +3078,6 @@ function ClassSections({ raw }: { raw: Record<string, unknown> }) {
         ))}
       </div>
     </>
-  );
-}
-
-function NodeProperties({ properties }: { properties: EditableProperty[] }) {
-  return (
-    <div className="node-properties">
-      {properties
-        .filter((property) => property.key || property.value)
-        .map((property) => (
-          <span key={property.id}>
-            {property.key}: {property.value}
-          </span>
-        ))}
-    </div>
   );
 }
 

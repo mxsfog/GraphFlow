@@ -25,10 +25,19 @@ class DocxTable:
 
 
 @dataclass(frozen=True)
+class DocxBlock:
+    index: int
+    kind: str
+    paragraph: DocxParagraph | None = None
+    table: DocxTable | None = None
+
+
+@dataclass(frozen=True)
 class DocxDocument:
     path: Path
     paragraphs: tuple[DocxParagraph, ...]
     tables: tuple[DocxTable, ...]
+    blocks: tuple[DocxBlock, ...] = ()
 
 
 def read_docx(path: Path) -> DocxDocument:
@@ -63,17 +72,38 @@ def read_docx(path: Path) -> DocxDocument:
     except ET.ParseError as exc:
         raise RuntimeError(f"Некорректный XML внутри DOCX: {path}") from exc
 
-    paragraphs = tuple(
-        DocxParagraph(
+    paragraph_elements = root.findall(".//w:p", NAMESPACES)
+    paragraph_by_element = {
+        id(paragraph): DocxParagraph(
             index=index,
             text=text,
             style=paragraph_style(paragraph, style_names),
         )
-        for index, paragraph in enumerate(root.findall(".//w:p", NAMESPACES))
+        for index, paragraph in enumerate(paragraph_elements)
         if (text := paragraph_text(paragraph))
+    }
+    table_elements = root.findall(".//w:tbl", NAMESPACES)
+    table_by_element = {id(table): parse_table(table) for table in table_elements}
+    body = root.find("w:body", NAMESPACES)
+    blocks = tuple(
+        block
+        for index, element in enumerate(iter_block_elements(body))
+        if (
+            block := document_block(
+                index,
+                element,
+                paragraph_by_element=paragraph_by_element,
+                table_by_element=table_by_element,
+            )
+        )
+        is not None
     )
-    tables = tuple(parse_table(table) for table in root.findall(".//w:tbl", NAMESPACES))
-    return DocxDocument(path=path, paragraphs=paragraphs, tables=tables)
+    return DocxDocument(
+        path=path,
+        paragraphs=tuple(paragraph_by_element.values()),
+        tables=tuple(table_by_element.values()),
+        blocks=blocks,
+    )
 
 
 def read_archive_member(archive: ZipFile, name: str, *, max_bytes: int) -> bytes:
@@ -126,3 +156,31 @@ def parse_table(table: ET.Element) -> DocxTable:
             cells.append(" / ".join(parts))
         rows.append(tuple(cells))
     return DocxTable(rows=tuple(rows))
+
+
+def iter_block_elements(parent: ET.Element | None):
+    if parent is None:
+        return
+    for child in parent:
+        if child.tag in {WORD + "p", WORD + "tbl"}:
+            yield child
+        elif child.tag != WORD + "sectPr":
+            yield from iter_block_elements(child)
+
+
+def document_block(
+    index: int,
+    element: ET.Element,
+    *,
+    paragraph_by_element: dict[int, DocxParagraph],
+    table_by_element: dict[int, DocxTable],
+) -> DocxBlock | None:
+    if element.tag == WORD + "p":
+        paragraph = paragraph_by_element.get(id(element))
+        return (
+            DocxBlock(index=index, kind="paragraph", paragraph=paragraph)
+            if paragraph is not None
+            else None
+        )
+    table = table_by_element.get(id(element))
+    return DocxBlock(index=index, kind="table", table=table) if table is not None else None

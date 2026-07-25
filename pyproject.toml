@@ -1,7 +1,7 @@
 [project]
 name = "electromotiv-practice-pipeline"
 version = "0.1.0"
-description = "Python news search, OpenRouter ranking, and OrientDB persistence pipeline for practice demo."
+description = "GraphFlow document and news processing pipeline with OrientDB persistence."
 requires-python = ">=3.11"
 dependencies = []
 
@@ -12,6 +12,7 @@ dev = [
 ]
 
 [project.scripts]
+graphflow = "electromotiv_pipeline.cli:main"
 electromotiv-news = "electromotiv_pipeline.cli:main"
 
 [tool.ruff]

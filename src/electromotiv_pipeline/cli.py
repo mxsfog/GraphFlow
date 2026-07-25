@@ -6,6 +6,7 @@ import json
 import os
 import sys
 from collections import Counter
+from collections.abc import Sequence
 from pathlib import Path
 
 from electromotiv_pipeline.config import DEFAULT_SCHEMA_PATH, build_config
@@ -26,6 +27,7 @@ COMMANDS = {
     "dashboard": "command_dashboard",
     "graph-api": "command_graph_api",
     "decompose-document": "command_decompose_document",
+    "import-documents": "command_import_documents",
     "import-technology-maps": "command_import_technology_maps",
 }
 
@@ -43,8 +45,8 @@ def main(argv: list[str] | None = None) -> None:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="electromotiv-news",
-        description="Python-пайплайн: Google News RSS -> LLM OpenRouter -> OrientDB.",
+        prog="graphflow",
+        description="GraphFlow: поиск новостей, импорт документов, OrientDB и Graph API.",
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
 
@@ -129,6 +131,31 @@ def build_parser() -> argparse.ArgumentParser:
         help="Путь к SQL-схеме.",
     )
 
+    import_parser = subparsers.add_parser(
+        "import-documents",
+        help="Построить граф из произвольного набора DOCX.",
+    )
+    add_common_config_args(import_parser, include_query=False)
+    import_parser.add_argument(
+        "--file",
+        action="append",
+        required=True,
+        help="Путь к DOCX. Аргумент можно указывать несколько раз.",
+    )
+    import_parser.add_argument(
+        "--profile",
+        default=None,
+        help="JSON-профиль предметного отображения. Без профиля используется структура DOCX.",
+    )
+    import_parser.add_argument("--title", default=None, help="Название графа.")
+    import_parser.add_argument("--graph-id", default=None, help="Стабильный идентификатор графа.")
+    import_parser.add_argument(
+        "--schema",
+        default=str(DEFAULT_SCHEMA_PATH),
+        help="Путь к SQL-схеме.",
+    )
+    import_parser.set_defaults(output="outputs/document_graph.json")
+
     technology_parser = subparsers.add_parser(
         "import-technology-maps",
         help="Построить интегрированный граф технологических карт и программ поддержки.",
@@ -154,12 +181,10 @@ def build_parser() -> argparse.ArgumentParser:
         default="technology-leadership",
         help="Стабильный идентификатор графа.",
     )
-    technology_parser.add_argument("--model", default=None, help="Модель OpenRouter.")
     technology_parser.add_argument(
-        "--program-extractor",
-        choices=("local", "openrouter"),
-        default="local",
-        help="Способ извлечения программ поддержки. По умолчанию данные не покидают компьютер.",
+        "--profile",
+        default="profiles/technology_leadership.json",
+        help="JSON-профиль отображения документов в граф.",
     )
     technology_parser.add_argument(
         "--schema",
@@ -358,24 +383,43 @@ def command_decompose_document(args: argparse.Namespace) -> None:
     )
 
 
-def command_import_technology_maps(args: argparse.Namespace) -> None:
-    from electromotiv_pipeline.docx_reader import read_docx
-    from electromotiv_pipeline.technology_graph import (
-        GraphBundle,
-        arrange_graph,
-        build_technology_maps,
-        normalize_bundle,
-        technology_catalog,
+def command_import_documents(args: argparse.Namespace) -> None:
+    import_documents(
+        args=args,
+        paths=[Path(value) for value in args.file],
+        profile_path=Path(args.profile) if args.profile else None,
     )
 
-    technology_path = Path(args.technology_file)
-    plan_path = Path(args.plan_file)
-    technology_document = read_docx(technology_path)
-    plan_document = read_docx(plan_path)
-    use_openrouter = args.program_extractor == "openrouter"
+
+def command_import_technology_maps(args: argparse.Namespace) -> None:
+    import_documents(
+        args=args,
+        paths=[Path(args.technology_file), Path(args.plan_file)],
+        profile_path=Path(args.profile),
+    )
+
+
+def import_documents(
+    *,
+    args: argparse.Namespace,
+    paths: list[Path],
+    profile_path: Path | None,
+) -> None:
+    from electromotiv_pipeline.docx_reader import read_docx
+    from electromotiv_pipeline.universal_import import (
+        build_universal_graph,
+        load_import_profile,
+    )
+
+    profile = load_import_profile(profile_path)
+    documents = [read_docx(path) for path in paths]
+    title = (args.title or default_document_title(paths)).strip()
+    graph_id = (args.graph_id or default_document_graph_id(paths, profile.profile_id)).strip()
+    if not title or not graph_id:
+        raise RuntimeError("Название и идентификатор графа не должны быть пустыми.")
     config = build_config_from_args(
         args,
-        require_openrouter=use_openrouter,
+        require_openrouter=False,
         require_orientdb=True,
     )
     client = OrientDBClient(
@@ -384,76 +428,55 @@ def command_import_technology_maps(args: argparse.Namespace) -> None:
         auth_header=config.orientdb_auth_header,
     )
     client.ensure_schema(Path(args.schema))
-
-    technology_graph = build_technology_maps(technology_document)
-    llm_response = ""
-    if use_openrouter:
-        from electromotiv_pipeline.technology_programs import (
-            build_program_graph_with_openrouter,
-        )
-
-        program_graph, llm_response = build_program_graph_with_openrouter(
-            document=plan_document,
-            technology_catalog=technology_catalog(technology_graph),
-            api_key=config.openrouter_api_key,
-            model=config.openrouter_model,
-        )
-        extractor = f"openrouter:{config.openrouter_model}"
-    else:
-        from electromotiv_pipeline.technology_programs_local import (
-            build_program_graph_locally,
-        )
-
-        program_graph = build_program_graph_locally(
-            document=plan_document,
-            technology_graph=technology_graph,
-        )
-        extractor = "local-rules-v1"
-    graph = arrange_graph(
-        normalize_bundle(
-            GraphBundle(
-                nodes=[*technology_graph.nodes, *program_graph.nodes],
-                edges=[*technology_graph.edges, *program_graph.edges],
-            )
-        )
-    )
+    result = build_universal_graph(documents, profile)
     client.save_graph_document(
-        graph_id=args.graph_id,
-        title=args.title,
-        source_type=f"docx:{extractor}",
-        nodes=graph.nodes,
-        edges=graph.edges,
+        graph_id=graph_id,
+        title=title,
+        source_type=f"docx:profile:{result.profile_id}",
+        nodes=result.graph.nodes,
+        edges=result.graph.edges,
     )
     output_path = Path(args.output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     audit = {
-        "graph_id": args.graph_id,
-        "title": args.title,
-        "extractor": extractor,
-        "source_files": [
-            file_fingerprint(technology_path),
-            file_fingerprint(plan_path),
-        ],
-        "statistics": graph_statistics(graph.nodes, graph.edges),
-        "nodes": graph.nodes,
-        "edges": graph.edges,
+        "graph_id": graph_id,
+        "title": title,
+        "extractor": "universal-profile-v1",
+        "profile": {
+            "id": result.profile_id,
+            "schema_version": profile.schema_version,
+            "file": profile_path.name if profile_path else None,
+        },
+        "source_files": [file_fingerprint(path) for path in paths],
+        "diagnostics": list(result.diagnostics),
+        "statistics": graph_statistics(result.graph.nodes, result.graph.edges),
+        "nodes": result.graph.nodes,
+        "edges": result.graph.edges,
     }
-    if llm_response:
-        audit["llm_response_sha256"] = hashlib.sha256(llm_response.encode("utf-8")).hexdigest()
     output_path.write_text(
         json.dumps(audit, ensure_ascii=False, indent=2) + "\n",
         encoding="utf-8",
     )
     json_print(
         {
-            "graph_id": args.graph_id,
-            "nodes": len(graph.nodes),
-            "edges": len(graph.edges),
-            "extractor": extractor,
+            "graph_id": graph_id,
+            "nodes": len(result.graph.nodes),
+            "edges": len(result.graph.edges),
+            "profile": result.profile_id,
             "output": str(output_path),
         },
         indent=2,
     )
+
+
+def default_document_title(paths: Sequence[Path]) -> str:
+    names = [path.stem for path in paths]
+    return names[0] if len(names) == 1 else f"Граф документов: {', '.join(names)}"
+
+
+def default_document_graph_id(paths: Sequence[Path], profile_id: str) -> str:
+    source = "|".join([profile_id, *(path.name for path in paths)])
+    return f"document-{hashlib.sha256(source.encode('utf-8')).hexdigest()[:16]}"
 
 
 def file_fingerprint(path: Path) -> dict[str, object]:
